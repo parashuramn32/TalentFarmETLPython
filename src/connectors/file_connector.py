@@ -26,7 +26,6 @@ class FileConnector:
         return df
 
     def read_filtered(self):
-        """Rows matching transaction_status = COMPLETED."""
         df = self.read()
         col = self.cfg["status_column"]
         allowed = [s.upper() for s in self.cfg["status_filter"]]

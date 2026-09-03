@@ -1,6 +1,6 @@
 # Online Sales API (backend service on port 5001)
 online_sales_api:
-  base_url: ${API_BASE_URL}          # e.g. http://127.0.0.1:5001/api
+  base_url: ${API_BASE_URL}
   endpoint: /online-sales
   health_endpoint: /health
   api_key: ${API_KEY}

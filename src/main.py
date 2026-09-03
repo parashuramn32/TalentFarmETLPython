@@ -1,6 +1,6 @@
 """
 Python QA Automation - Financial Services Sales Data Pipeline
-Submission 2 : Test Design and Automation Build
+Submission 3 : Test Execution, Defect Reporting and Final QA Summary
 
 Usage:
     python -m src.main --health-check
@@ -9,15 +9,20 @@ Usage:
     python -m src.main --date 2026-05-01 --regression
 """
 import argparse
+import json
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, run_log_path
 from src.utils import report_generator as rpt
+from src.utils import defect_logger
+from src.utils.result import FAIL, BLOCKED
 
 log = get_logger("qa_automation.main")
 LAYERS = ["source", "master", "datamart", "aggregate", "reporting"]
+EVIDENCE_DIR = Path(__file__).resolve().parents[1] / "reports" / "evidence"
 
 
 def run_health_check():
@@ -44,6 +49,40 @@ def run_health_check():
     return ok
 
 
+def _write_evidence(results, business_date):
+    """Persist per-failure evidence files (Assignment 3, Section 7)."""
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    written = []
+    for r in results:
+        if r.status not in (FAIL, BLOCKED):
+            continue
+        payload = {
+            "validation_id": r.test_case_id,
+            "layer": r.layer,
+            "description": r.description,
+            "risk_reference": r.risk_ref,
+            "business_date": business_date,
+            "environment": r.environment,
+            "source_object": r.source_object,
+            "target_object": r.target_object,
+            "expected": r.expected,
+            "actual": r.actual,
+            "variance": r.variance,
+            "status": r.status,
+            "severity": r.severity,
+            "remarks": r.message,
+            "failed_sample": r.failed_sample,
+            "executed_at": r.executed_at,
+            "log_file": run_log_path().name,
+        }
+        path = EVIDENCE_DIR / f"{r.test_case_id}_{r.status}.json"
+        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        written.append(path.name)
+    if written:
+        log.info("Evidence files written to %s (%s files)", EVIDENCE_DIR, len(written))
+    return written
+
+
 def run(business_date, layers, from_date=None, to_date=None, use_csv=False):
     from src.connectors.db_connector import DBConnector
     from src.connectors.file_connector import FileConnector
@@ -61,6 +100,7 @@ def run(business_date, layers, from_date=None, to_date=None, use_csv=False):
 
     log.info("=" * 70)
     log.info("QA validation run | business_date=%s | layers=%s", business_date, layers)
+    log.info("Log file: %s", run_log_path())
     log.info("=" * 70)
 
     try:
@@ -126,14 +166,25 @@ def run(business_date, layers, from_date=None, to_date=None, use_csv=False):
     finally:
         db.dispose()
 
-    log.info("Run complete in %ss with %s result(s)", round(time.time() - started, 2), len(results))
-    if results:
-        rpt.print_console(results)
-        rpt.to_excel(results)
-        rpt.to_html(results)
+    log.info("Run complete in %ss with %s result(s)",
+             round(time.time() - started, 2), len(results))
 
-    s = rpt.summarise(results)
-    return 0 if s["failed"] == 0 and s["errors"] == 0 else 1
+    if results:
+        rpt.print_console(results, business_date)
+        xlsx = rpt.to_excel(results, business_date=business_date)
+        html = rpt.to_html(results, business_date=business_date)
+        dpath, defects = defect_logger.to_excel(results, business_date=business_date)
+        evidence = _write_evidence(results, business_date)
+
+        print("Deliverables generated:")
+        print(f"  Validation report (Excel) : {xlsx}")
+        print(f"  Validation report (HTML)  : {html}")
+        print(f"  Defect log                : {dpath}  ({len(defects)} defect(s))")
+        print(f"  Evidence files            : {EVIDENCE_DIR}  ({len(evidence)} file(s))")
+        print(f"  Execution log             : {run_log_path()}\n")
+
+    s = rpt.summarise(results, business_date)
+    return 0 if s["failed"] == 0 and s["blocked"] == 0 else 1
 
 
 def main():

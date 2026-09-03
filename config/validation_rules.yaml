@@ -3,7 +3,6 @@ tolerance:
   amount: 0.01
   percentage: 0.001
 
-# No reversal_amount column exists in this schema.
 net_amount_formula: "gross_sales_amount - COALESCE(discount_amount,0)"
 
 datamart_columns:
@@ -43,14 +42,14 @@ product_harmonisation:
   Insurance:         {type: INSURANCE,   category: Life Insurance}
   ULIP:              {type: INSURANCE,   category: ULIP}
   "Term Plan":       {type: INSURANCE,   category: Life Insurance}
-  "Health Insurance":{type: INSURANCE,   category: Health Insurance}
+  "Health Insurance": {type: INSURANCE,  category: Health Insurance}
   MF:                {type: MUTUAL_FUND, category: null}
   "Mutual Fund":     {type: MUTUAL_FUND, category: null}
   SIP:               {type: MUTUAL_FUND, category: SIP}
   "Equity Fund":     {type: MUTUAL_FUND, category: Equity Fund}
   "Debt Fund":       {type: MUTUAL_FUND, category: Debt Fund}
   "Hybrid Fund":     {type: MUTUAL_FUND, category: Hybrid Fund}
-  "Large Cap Equity":{type: MUTUAL_FUND, category: Equity Fund}
+  "Large Cap Equity": {type: MUTUAL_FUND, category: Equity Fund}
   "Gilt Fund":       {type: MUTUAL_FUND, category: Debt Fund}
 
 channel_by_source:
@@ -63,7 +62,7 @@ allowed_values:
   region_name: [NORTH, SOUTH, EAST, WEST, CENTRAL, UNKNOWN_REGION]
   source_channel: [Retail, Distributor, Online]
   kyc_status: [VERIFIED, PENDING, REJECTED, EXPIRED]
-  active_flag: [0, 1]          # TINYINT in this schema, not Y/N
+  active_flag: [0, 1]
 
 state_normalisation:
   MH: Maharashtra
@@ -80,3 +79,72 @@ patterns:
 
 thresholds:
   unknown_region_pct: 5.0
+
+# ---------------------------------------------------------------------------
+# Submission 3 alignment
+# ---------------------------------------------------------------------------
+# Assignment 3 Section 8 defines a three-level severity scale (High/Medium/Low).
+# The internal test design uses Critical for executive-metric distortion and
+# compliance breaches; it maps to High in the reportable defect log.
+severity_map:
+  Critical: High
+  High: High
+  Medium: Medium
+  Low: Low
+
+# Business impact statements used when generating the defect log (Section 6).
+business_impact:
+  R-SS-01: "Sales volume under-reported; downstream totals and incentive calculations understated."
+  R-SS-02: "Duplicate transactions inflate reported sales and distort average ticket size."
+  R-SS-03: "Cancelled/rejected transactions inflate revenue and misstate executive metrics."
+  R-SS-04: "Transaction identity lost between layers; end-to-end traceability broken."
+  R-SS-05: "Transactions cannot be attributed to a customer, breaking enrichment and compliance checks."
+  R-SS-06: "Later API pages dropped; a full day of online sales may be silently missing."
+  R-SS-07: "Structural change may break the load and corrupt downstream columns."
+  R-SS-08: "Invalid amounts or dates corrupt aggregates and trend reporting."
+  R-SS-09: "Field values differ from source; reported figures cannot be trusted."
+  R-SS-10: "Transactions attributed to the wrong business date, distorting daily trend reporting."
+  R-SS-11: "Load lineage missing; failures cannot be traced to a batch during audit."
+  R-SS-13: "Commission exceeds sale value, indicating incorrect payout calculation."
+  R-SS-14: "Online sales cannot be extracted; the channel is missing from reporting."
+  R-SS-15: "Unauthenticated access possible to customer transaction data."
+  R-SS-16: "Response structure deviates from contract; extraction may silently drop fields."
+  R-SS-17: "Out-of-period records included, overstating the reporting window."
+  R-DQ-01: "Reference data incomplete; enrichment and harmonisation will fail for missing keys."
+  R-DQ-02: "Invalid contact data prevents customer communication and fails data quality standards."
+  R-DQ-03: "State values do not resolve, pushing revenue into UNKNOWN_REGION and distorting regional performance."
+  R-DQ-04: "Transactions reference unknown products/regions/branches; revenue cannot be correctly categorised."
+  R-DQ-05: "Transactions reference unknown customers; enrichment and KYC compliance cannot be evaluated."
+  R-DQ-06: "Revenue recognised from customers who failed KYC - a regulatory compliance breach."
+  R-DQ-07: "Implausible customer demographics undermine segmentation and reporting confidence."
+  R-DQ-08: "Product type outside the allowed domain breaks insurance vs mutual fund split."
+  R-DQ-09: "Region outside the allowed domain breaks regional roll-ups."
+  R-DQ-10: "Policy/folio identifiers missing; transactions cannot be reconciled with the issuing system."
+  R-DM-01: "Product mix misstated - insurance premium and mutual fund sales are both wrong."
+  R-DM-02: "ULIP revenue reported as mutual fund, understating insurance premium in executive reporting."
+  R-DM-03: "Non-standard product naming fragments product-level reporting."
+  R-DM-04: "Channel contribution misstated, distorting channel performance reviews."
+  R-DM-05: "Revenue attributed to the wrong region, distorting regional targets and scorecards."
+  R-DM-06: "Online revenue not attributed to a region, understating regional performance."
+  R-DM-08: "Customer names inconsistent, causing duplicate customer views in reporting."
+  R-DM-09: "Customer geography missing, preventing regional analysis of online sales."
+  R-DM-10: "Net sales value incorrect - the headline revenue figure is wrong."
+  R-DM-11: "Sales recorded against discontinued products, indicating a control gap."
+  R-DM-12: "Data mart volume does not reconcile with staging; revenue is over- or under-stated."
+  R-DM-13: "Unattributed transactions counted as valid revenue."
+  R-DM-14: "Material revenue sits in UNKNOWN_REGION and is excluded from regional reporting."
+  R-AG-01: "Summary totals disagree with transaction detail; dashboards show incorrect revenue."
+  R-AG-02: "Grouping error misallocates revenue across products or dates."
+  R-AG-03: "Average ticket size incorrect, misleading sales-quality analysis."
+  R-AG-04: "Executive dashboard metrics incorrect - leadership decisions based on wrong numbers."
+  R-AG-05: "Top performing region/channel misidentified, misdirecting sales focus."
+  R-AG-06: "Summary models disagree; the same metric differs by report."
+  R-RP-01: "Dashboard displays a figure that does not match the data mart; users lose trust in reporting."
+  R-RP-02: "Filtered views return incorrect results, misinforming regional and product analysis."
+  R-RP-03: "Trend reporting covers the wrong period, distorting performance comparisons."
+  R-RP-04: "Dashboards show stale data; decisions made on out-of-date figures."
+  R-RP-05: "Reporting view loses or alters data mart values before display."
+  R-RP-06: "The same metric differs between reports, undermining confidence in all reporting."
+  R-RG-01: "A defect fix has broken previously working behaviour."
+  R-RG-02: "A new load has introduced a regression in existing data."
+  R-RG-03: "The suite failed to detect a known seeded defect, indicating a coverage gap."

@@ -43,3 +43,8 @@ def load_rules():
     """validation_rules.yaml contains no env placeholders."""
     with open(CONFIG_DIR / "validation_rules.yaml", "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def environment_name():
+    """Environment label recorded in the execution summary (Section 5)."""
+    return os.getenv("QA_ENVIRONMENT", "LAB")

@@ -1,5 +1,4 @@
 # Reporting app (port 5002) and the five views from 04CreateReportingViews.sql.
-# Each view is SELECT * of its data mart summary table.
 reporting_app:
   base_url: ${REPORT_BASE_URL}
   timeout_seconds: 30

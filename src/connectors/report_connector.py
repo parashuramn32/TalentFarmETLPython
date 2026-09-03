@@ -34,13 +34,6 @@ class ReportConnector:
             log.warning("No HTML tables found on report %s", report_key)
             return []
 
-    @staticmethod
-    def to_number(text):
-        if text is None:
-            return None
-        m = _NUM.search(str(text).replace("\u20b9", "").strip())
-        return float(m.group().replace(",", "")) if m else None
-
     def extract_metrics(self, report_key, labels, params=None):
         html = self.fetch(report_key, params)
         found = {}

@@ -5,3 +5,7 @@ __pycache__/
 .pytest_cache/
 logs/*.log
 reports/validation_report_*
+reports/defect_log_*
+
+tests/mock/*.db
+reports/mock_*

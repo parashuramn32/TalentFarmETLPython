@@ -1,13 +1,10 @@
 """Layer 3b validators - Data Mart to Reporting.
 
-All five views are SELECT * from their data mart summary table
+All five views are SELECT * of their data mart summary table
 (04CreateReportingViews.sql), so view-vs-data-mart must reconcile exactly.
 """
-import pandas as pd
-
 from src.validators.base_validator import BaseValidator
 from src.utils.config_loader import load_config, load_rules
-from src.utils.result import ValidationResult
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -41,11 +38,9 @@ class ReportingValidator(BaseValidator):
         for key, (tc, sev) in VIEW_TESTS.items():
             spec = self.cfg[key]
             view, dm_tbl, measure = spec["view"], spec["dm_table"], spec["measure"]
-            res = ValidationResult(
-                test_case_id=tc, layer=LAYER,
-                description=f"{view} reconciles with {dm_tbl}",
-                source_object=dm_tbl, target_object=view,
-                severity=sev, risk_ref="R-RP-05")
+            res = self._res(tc, LAYER, f"{view} reconciles with {dm_tbl}",
+                            source_object=dm_tbl, target_object=view,
+                            severity=sev, risk_ref="R-RP-05")
             try:
                 v = self.db.scalar("reporting",
                                    f"SELECT COALESCE(SUM({measure}),0) FROM {view} "
@@ -55,13 +50,20 @@ class ReportingValidator(BaseValidator):
                                    "WHERE sale_date = :d", {"d": business_date})
                 vr = self.db.count("reporting", view, "sale_date = :d", {"d": business_date})
                 dr = self.db.count("datamart", dm_tbl, "sale_date = :d", {"d": business_date})
-                res.expected = f"{dr} rows / {round(float(d or 0), 2)}"
-                res.actual = f"{vr} rows / {round(float(v or 0), 2)}"
-                ok = (abs(float(d or 0) - float(v or 0)) <= self.tolerance) and (vr == dr)
-                res.status = "PASS" if ok else "FAIL"
-                res.message = f"data mart={res.expected}, view={res.actual}"
             except Exception as exc:
-                res.status, res.message = "ERROR", str(exc)[:200]
+                results.append(self._blocked(res, f"View or data mart unreadable: "
+                                                  f"{type(exc).__name__}"))
+                continue
+            if dr == 0 and vr == 0:
+                results.append(self._skipped(res, "No rows in either object for the date"))
+                continue
+            res.expected = round(float(d or 0), 2)
+            res.actual = round(float(v or 0), 2)
+            ok = (abs(float(d or 0) - float(v or 0)) <= self.tolerance) and (vr == dr)
+            res.status = "PASS" if ok else "FAIL"
+            res.message = (f"data mart: {dr} rows / {res.expected} | "
+                           f"view: {vr} rows / {res.actual}")
+            res.compute_variance()
             log.info("[%s] %s - %s", tc, res.status, res.message)
             results.append(res)
         return results
@@ -71,103 +73,114 @@ class ReportingValidator(BaseValidator):
         for key, (tc, sev) in PAGE_TESTS.items():
             spec = self.cfg[key]
             view, measure, path = spec["view"], spec["measure"], spec["path"]
-            res = ValidationResult(
-                test_case_id=tc, layer=LAYER,
-                description=f"{path} displayed total vs {view}",
-                source_object=view, target_object=path,
-                severity=sev, risk_ref="R-RP-01")
+            res = self._res(tc, LAYER, f"{path} displayed total vs {view}",
+                            source_object=view, target_object=path,
+                            severity=sev, risk_ref="R-RP-01")
             try:
                 expected = float(self.db.scalar(
                     "reporting", f"SELECT COALESCE(SUM({measure}),0) FROM {view} "
                     "WHERE sale_date = :d", {"d": business_date}) or 0)
-                displayed = self.rc.page_total(key, params={"date": business_date})
-                res.expected, res.actual = round(expected, 2), displayed
-                if displayed is None:
-                    res.status, res.message = "FAIL", "Could not extract a total from the page"
-                else:
-                    ok = abs(expected - displayed) <= max(self.tolerance, 1.0)
-                    res.status = "PASS" if ok else "FAIL"
-                    res.message = f"view={res.expected}, displayed={displayed}"
             except Exception as exc:
-                res.status, res.message = "ERROR", str(exc)[:200]
+                results.append(self._blocked(res, f"Reporting view unreadable: "
+                                                  f"{type(exc).__name__}"))
+                continue
+            try:
+                displayed = self.rc.page_total(key, params={"date": business_date})
+            except Exception as exc:
+                results.append(self._blocked(res, f"Report page unreachable: "
+                                                  f"{type(exc).__name__}"))
+                continue
+            if displayed is None:
+                results.append(self._blocked(
+                    res, "No numeric total could be extracted from the rendered page"))
+                continue
+            res.expected, res.actual = round(expected, 2), displayed
+            ok = abs(expected - displayed) <= max(self.tolerance, 1.0)
+            res.status = "PASS" if ok else "FAIL"
+            res.message = f"view={res.expected}, displayed={displayed}"
+            res.compute_variance()
             log.info("[%s] %s - %s", tc, res.status, res.message)
             results.append(res)
         return results
 
     def validate_filters(self, business_date):
-        res = ValidationResult(
-            test_case_id="RPT-V08", layer=LAYER,
-            description="Region filter on the region report matches filtered data mart query",
-            source_object="vw_region_performance",
-            target_object=self.cfg["region_performance"]["path"],
-            severity="High", risk_ref="R-RP-02")
+        res = self._res("RPT-V08", LAYER,
+                        "Region filter on the region report matches the filtered data mart query",
+                        source_object="vw_region_performance",
+                        target_object=self.cfg["region_performance"]["path"],
+                        severity="High", risk_ref="R-RP-02")
+        measure = self.cfg["region_performance"]["measure"]
         try:
-            measure = self.cfg["region_performance"]["measure"]
             regions = self.db.query(
                 "reporting",
                 "SELECT DISTINCT region_name FROM vw_region_performance WHERE sale_date = :d",
                 {"d": business_date})
-            if regions.empty:
-                res.status, res.message = "SKIPPED", "No regions available to filter"
-                return res
-            region = regions.iloc[0, 0]
+        except Exception as exc:
+            return self._blocked(res, f"Reporting view unreadable: {type(exc).__name__}")
+        if regions.empty:
+            return self._skipped(res, "No regions available to filter on")
+        region = regions.iloc[0, 0]
+        try:
             expected = float(self.db.scalar(
                 "reporting", f"SELECT COALESCE(SUM({measure}),0) FROM vw_region_performance "
                 "WHERE sale_date = :d AND region_name = :r",
                 {"d": business_date, "r": region}) or 0)
             displayed = self.rc.page_total("region_performance",
                                            params={"date": business_date, "region": region})
-            res.expected, res.actual = round(expected, 2), displayed
-            if displayed is None:
-                res.status, res.message = "FAIL", f"No filtered total extracted for {region}"
-            else:
-                ok = abs(expected - displayed) <= max(self.tolerance, 1.0)
-                res.status = "PASS" if ok else "FAIL"
-                res.message = f"region={region}: expected={res.expected}, displayed={displayed}"
         except Exception as exc:
-            res.status, res.message = "ERROR", str(exc)[:200]
+            return self._blocked(res, f"Filtered report unavailable: {type(exc).__name__}")
+        if displayed is None:
+            return self._blocked(res, f"No filtered total extracted for region {region}")
+        res.expected, res.actual = round(expected, 2), displayed
+        ok = abs(expected - displayed) <= max(self.tolerance, 1.0)
+        res.status = "PASS" if ok else "FAIL"
+        res.message = f"region={region}: expected={res.expected}, displayed={displayed}"
+        res.compute_variance()
         log.info("[RPT-V08] %s - %s", res.status, res.message)
         return res
 
     def validate_freshness(self, business_date):
-        res = ValidationResult(
-            test_case_id="RPT-V09", layer=LAYER,
-            description="Reporting layer reflects the latest completed load",
-            source_object="dm_sales_transaction", target_object="vw_daily_sales_trend",
-            severity="Medium", risk_ref="R-RP-04")
+        res = self._res("RPT-V09", LAYER,
+                        "Reporting layer reflects the latest completed load",
+                        source_object="dm_sales_transaction",
+                        target_object="vw_daily_sales_trend",
+                        severity="Medium", risk_ref="R-RP-04")
         try:
             dm_max = self.db.scalar("datamart", "SELECT MAX(sale_date) FROM dm_sales_transaction")
             rp_max = self.db.scalar("reporting", "SELECT MAX(sale_date) FROM vw_daily_sales_trend")
-            res.expected, res.actual = str(dm_max), str(rp_max)
-            res.status = "PASS" if str(dm_max) == str(rp_max) else "FAIL"
-            res.message = f"data mart max date={dm_max}, reporting max date={rp_max}"
         except Exception as exc:
-            res.status, res.message = "ERROR", str(exc)[:200]
+            return self._blocked(res, f"Could not read max sale_date: {type(exc).__name__}")
+        res.expected, res.actual = str(dm_max), str(rp_max)
+        res.status = "PASS" if str(dm_max) == str(rp_max) else "FAIL"
+        res.message = f"data mart max date={dm_max}, reporting max date={rp_max}"
+        res.compute_variance()
         log.info("[RPT-V09] %s - %s", res.status, res.message)
         return res
 
     def validate_cross_report(self, business_date):
-        res = ValidationResult(
-            test_case_id="RPT-V10", layer=LAYER,
-            description="Executive net total equals channel, region and daily view totals",
-            source_object="vw_executive_dashboard",
-            target_object="vw_channel_performance / vw_region_performance / vw_daily_sales_trend",
-            severity="High", risk_ref="R-RP-06")
-        try:
-            totals = {}
-            for name, view in (("executive", "vw_executive_dashboard"),
-                               ("channel", "vw_channel_performance"),
-                               ("region", "vw_region_performance"),
-                               ("daily", "vw_daily_sales_trend")):
+        res = self._res("RPT-V10", LAYER,
+                        "Executive net total equals channel, region and daily view totals",
+                        source_object="vw_executive_dashboard",
+                        target_object="vw_channel_performance / vw_region_performance / "
+                                      "vw_daily_sales_trend",
+                        severity="High", risk_ref="R-RP-06")
+        totals = {}
+        for name, view in (("executive", "vw_executive_dashboard"),
+                           ("channel", "vw_channel_performance"),
+                           ("region", "vw_region_performance"),
+                           ("daily", "vw_daily_sales_trend")):
+            try:
                 v = self.db.scalar(
                     "reporting",
                     f"SELECT COALESCE(SUM(total_net_sales_amount),0) FROM {view} "
                     "WHERE sale_date = :d", {"d": business_date})
                 totals[name] = round(float(v or 0), 2)
-            res.expected, res.actual = totals.get("executive"), totals
-            res.status = "PASS" if len(set(totals.values())) <= 1 else "FAIL"
-            res.message = f"view totals: {totals}"
-        except Exception as exc:
-            res.status, res.message = "ERROR", str(exc)[:200]
+            except Exception as exc:
+                return self._blocked(res, f"{view} unreadable: {type(exc).__name__}")
+        res.expected = totals.get("executive")
+        res.actual = totals
+        res.status = "PASS" if len(set(totals.values())) <= 1 else "FAIL"
+        res.message = f"view totals: {totals}"
+        res.compute_variance()
         log.info("[RPT-V10] %s - %s", res.status, res.message)
         return res
