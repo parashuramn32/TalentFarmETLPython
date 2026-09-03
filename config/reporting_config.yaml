@@ -1,0 +1,32 @@
+# Reporting app (port 5002) and the five views from 04CreateReportingViews.sql.
+# Each view is SELECT * of its data mart summary table.
+reporting_app:
+  base_url: ${REPORT_BASE_URL}
+  timeout_seconds: 30
+
+reports:
+  executive_dashboard:
+    path: /reports/executive-dashboard
+    view: vw_executive_dashboard
+    dm_table: dm_executive_sales_summary
+    measure: total_net_sales_amount
+  channel_performance:
+    path: /reports/channel-performance
+    view: vw_channel_performance
+    dm_table: dm_sales_channel_summary
+    measure: total_net_sales_amount
+  region_performance:
+    path: /reports/region-performance
+    view: vw_region_performance
+    dm_table: dm_sales_region_summary
+    measure: total_net_sales_amount
+  product_performance:
+    path: /reports/product-performance
+    view: vw_product_performance
+    dm_table: dm_sales_product_summary
+    measure: total_net_sales_amount
+  daily_sales_trend:
+    path: /reports/daily-sales-trend
+    view: vw_daily_sales_trend
+    dm_table: dm_sales_daily_summary
+    measure: total_net_sales_amount

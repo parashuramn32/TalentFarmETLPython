@@ -1,0 +1,82 @@
+# Business rules and COLUMN CONTRACTS - verified against 02CreateTables.sql
+tolerance:
+  amount: 0.01
+  percentage: 0.001
+
+# No reversal_amount column exists in this schema.
+net_amount_formula: "gross_sales_amount - COALESCE(discount_amount,0)"
+
+datamart_columns:
+  primary_key: sales_transaction_id
+  channel: source_channel
+  gross: gross_sales_amount
+  discount: discount_amount
+  net: net_sales_amount
+  commission: commission_amount
+  customer_name: customer_name_clean
+  customer_state: customer_state
+  region: region_name
+  product_name: standard_product_name
+  product_type: standard_product_type
+  product_category: product_category
+  status: transaction_status
+
+summary_columns:
+  count: transaction_count
+  gross: total_gross_sales_amount
+  net: total_net_sales_amount
+  avg: avg_ticket_size
+
+executive_columns:
+  count: total_transactions
+  insurance: total_insurance_premium
+  mutual_fund: total_mutual_fund_sales
+  net: total_net_sales_amount
+  avg: avg_ticket_size
+  top_region: top_region
+  top_channel: top_channel
+
+product_harmonisation:
+  LI:                {type: INSURANCE,   category: Life Insurance}
+  "Life Ins":        {type: INSURANCE,   category: Life Insurance}
+  "Life Insurance":  {type: INSURANCE,   category: Life Insurance}
+  Insurance:         {type: INSURANCE,   category: Life Insurance}
+  ULIP:              {type: INSURANCE,   category: ULIP}
+  "Term Plan":       {type: INSURANCE,   category: Life Insurance}
+  "Health Insurance":{type: INSURANCE,   category: Health Insurance}
+  MF:                {type: MUTUAL_FUND, category: null}
+  "Mutual Fund":     {type: MUTUAL_FUND, category: null}
+  SIP:               {type: MUTUAL_FUND, category: SIP}
+  "Equity Fund":     {type: MUTUAL_FUND, category: Equity Fund}
+  "Debt Fund":       {type: MUTUAL_FUND, category: Debt Fund}
+  "Hybrid Fund":     {type: MUTUAL_FUND, category: Hybrid Fund}
+  "Large Cap Equity":{type: MUTUAL_FUND, category: Equity Fund}
+  "Gilt Fund":       {type: MUTUAL_FUND, category: Debt Fund}
+
+channel_by_source:
+  retail: Retail
+  distributor: Distributor
+  online: Online
+
+allowed_values:
+  standard_product_type: [INSURANCE, MUTUAL_FUND]
+  region_name: [NORTH, SOUTH, EAST, WEST, CENTRAL, UNKNOWN_REGION]
+  source_channel: [Retail, Distributor, Online]
+  kyc_status: [VERIFIED, PENDING, REJECTED, EXPIRED]
+  active_flag: [0, 1]          # TINYINT in this schema, not Y/N
+
+state_normalisation:
+  MH: Maharashtra
+  "Mah.": Maharashtra
+  MAHARASHTRA: Maharashtra
+  Mahrashtra: Maharashtra
+  KA: Karnataka
+  TN: "Tamil Nadu"
+  DL: Delhi
+
+patterns:
+  mobile: "^[6-9][0-9]{9}$"
+  email: "^[^@\\s]+@[^@\\s]+\\.[a-zA-Z]{2,}$"
+
+thresholds:
+  unknown_region_pct: 5.0

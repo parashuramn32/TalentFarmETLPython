@@ -1,0 +1,11 @@
+# Online Sales API (backend service on port 5001)
+online_sales_api:
+  base_url: ${API_BASE_URL}          # e.g. http://127.0.0.1:5001/api
+  endpoint: /online-sales
+  health_endpoint: /health
+  api_key: ${API_KEY}
+  page_size: 500
+  timeout_seconds: 30
+  max_retries: 3
+  backoff_seconds: 5
+  rate_limit_per_minute: 100

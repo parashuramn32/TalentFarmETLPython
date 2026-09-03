@@ -1,0 +1,17 @@
+# Database configuration - read-only QA connections (learner_user)
+# Schemas verified against 01Cretaedatabase.sql
+mysql:
+  host: ${DB_HOST}
+  port: 3306
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
+  charset: utf8mb4
+  connect_timeout: 30
+
+databases:
+  source_retail:      fs_source_retail       # also holds customer/product/branch masters
+  source_distributor: fs_source_distributor
+  source_online:      fs_source_online
+  staging:            fs_staging
+  datamart:           fs_datamart
+  reporting:          fs_reporting
