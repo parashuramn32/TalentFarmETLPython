@@ -1,4 +1,4 @@
-# Reporting app (port 5002) and the five views from 04CreateReportingViews.sql.
+# The five views from 04CreateReportingViews.sql are SELECT * of their DM table.
 reporting_app:
   base_url: ${REPORT_BASE_URL}
   timeout_seconds: 30

@@ -1,11 +1,9 @@
-"""Validation execution report generation.
+"""Validation execution report (Assignment 3, Section 5).
 
-Assignment 3, Section 5 requires:
-  * Execution Summary  : date/time of execution, environment, code version,
-                         total validations run, and counts of
-                         passed / failed / skipped / BLOCKED
-  * Layer-wise Results : grouped by validation layer
-  * Detailed Results   : validation ID, expected, actual, VARIANCE, status, remarks
+  Execution Summary  : date/time, environment, code version, totals and counts of
+                       passed / failed / skipped / BLOCKED
+  Layer-wise Results : grouped by validation layer
+  Detailed Results   : validation ID, expected, actual, VARIANCE, status, remarks
 """
 from pathlib import Path
 from datetime import datetime
@@ -21,7 +19,7 @@ log = get_logger(__name__)
 REPORT_DIR = Path(__file__).resolve().parents[2] / "reports"
 REPORT_DIR.mkdir(exist_ok=True)
 
-CODE_VERSION = "2.1.0"      # bumped for the Submission 3 reporting format
+CODE_VERSION = "2.2.0"
 
 STATUS_COLOR = {PASS: "C6EFCE", FAIL: "FFC7CE", BLOCKED: "FFD9B3", SKIPPED: "D9D9D9"}
 STATUS_FONT = {PASS: "006100", FAIL: "9C0006", BLOCKED: "9C4500", SKIPPED: "595959"}
@@ -42,20 +40,19 @@ def _git_commit():
 
 
 def _frame(results):
+    if not results:
+        return pd.DataFrame(columns=DETAIL_COLS)
     return pd.DataFrame([r.to_dict() for r in results])
 
 
-# ---------------------------------------------------------------- summary
-def summarise(results, business_date=None, started_at=None):
-    """Execution summary block required by Section 5."""
+def summarise(results, business_date=None):
     df = _frame(results)
     total = len(df)
     counts = {s: int((df["status"] == s).sum()) if total else 0
               for s in (PASS, FAIL, SKIPPED, BLOCKED)}
     executed = total - counts[SKIPPED] - counts[BLOCKED]
-    now = datetime.now()
     return {
-        "execution_datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "execution_datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "business_date_validated": business_date or "n/a",
         "environment": environment_name(),
         "code_version": f"{CODE_VERSION} (commit {_git_commit()})",
@@ -73,7 +70,6 @@ def summarise(results, business_date=None, started_at=None):
 
 
 def layer_summary(results):
-    """Layer-wise breakdown required by Section 5."""
     df = _frame(results)
     if df.empty:
         return pd.DataFrame()
@@ -88,11 +84,37 @@ def layer_summary(results):
     return piv[["layer", "TOTAL", PASS, FAIL, SKIPPED, BLOCKED, "PASS_RATE_PCT"]]
 
 
-# ---------------------------------------------------------------- excel
-def to_excel(results, filename=None, business_date=None):
+def _style(xl):
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
+    thin = Side(style="thin", color="A6A6A6")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for sheet in xl.book.worksheets:
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF", size=10, name="Arial")
+            cell.fill = PatternFill("solid", start_color="1F3864")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        headers = [c.value for c in sheet[1]]
+        if "status" in headers:
+            idx = headers.index("status") + 1
+            for row in range(2, sheet.max_row + 1):
+                c = sheet.cell(row, idx)
+                if str(c.value) in STATUS_COLOR:
+                    c.fill = PatternFill("solid", start_color=STATUS_COLOR[str(c.value)])
+                    c.font = Font(bold=True, color=STATUS_FONT[str(c.value)],
+                                  size=9, name="Arial")
+                    c.alignment = Alignment(horizontal="center")
+        for i, col in enumerate(headers, 1):
+            width = (46 if col in ("description", "remarks") else
+                     26 if col in ("source_object", "target_object", "expected",
+                                   "actual", "variance") else
+                     30 if col == "Value" else 15)
+            sheet.column_dimensions[get_column_letter(i)].width = width
+        sheet.freeze_panes = "A2"
 
+
+def to_excel(results, filename=None, business_date=None):
     df = _frame(results)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = REPORT_DIR / (filename or f"validation_report_{stamp}.xlsx")
@@ -106,45 +128,19 @@ def to_excel(results, filename=None, business_date=None):
         if not ls.empty:
             ls.to_excel(xl, sheet_name="Layer-wise Results", index=False)
         detail.to_excel(xl, sheet_name="Detailed Results", index=False)
-        fails = detail[detail["status"] == FAIL]
-        if not fails.empty:
-            fails.to_excel(xl, sheet_name="Failures", index=False)
-        blocked = detail[detail["status"] == BLOCKED]
-        if not blocked.empty:
-            blocked.to_excel(xl, sheet_name="Blocked", index=False)
-
-        thin = Side(style="thin", color="A6A6A6")
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        for sheet in xl.book.worksheets:
-            for cell in sheet[1]:
-                cell.font = Font(bold=True, color="FFFFFF", size=10, name="Arial")
-                cell.fill = PatternFill("solid", start_color="1F3864")
-                cell.alignment = Alignment(horizontal="center", vertical="center",
-                                           wrap_text=True)
-                cell.border = border
-            headers = [c.value for c in sheet[1]]
-            if "status" in headers:
-                idx = headers.index("status") + 1
-                for row in range(2, sheet.max_row + 1):
-                    c = sheet.cell(row, idx)
-                    if str(c.value) in STATUS_COLOR:
-                        c.fill = PatternFill("solid", start_color=STATUS_COLOR[str(c.value)])
-                        c.font = Font(bold=True, color=STATUS_FONT[str(c.value)],
-                                      size=9, name="Arial")
-                        c.alignment = Alignment(horizontal="center")
-            for i, col in enumerate(headers, 1):
-                width = (46 if col in ("description", "remarks") else
-                         26 if col in ("source_object", "target_object",
-                                       "expected", "actual", "variance") else
-                         30 if col == "Value" else 15)
-                sheet.column_dimensions[get_column_letter(i)].width = width
-            sheet.freeze_panes = "A2"
+        if not detail.empty:
+            fails = detail[detail["status"] == FAIL]
+            if not fails.empty:
+                fails.to_excel(xl, sheet_name="Failures", index=False)
+            blocked = detail[detail["status"] == BLOCKED]
+            if not blocked.empty:
+                blocked.to_excel(xl, sheet_name="Blocked", index=False)
+        _style(xl)
 
     log.info("Excel validation report written: %s", path)
     return path
 
 
-# ---------------------------------------------------------------- html
 def to_html(results, filename=None, business_date=None):
     df = _frame(results)
     s = summarise(results, business_date)
@@ -157,23 +153,16 @@ def to_html(results, filename=None, business_date=None):
         for k, v in s.items()
         if k not in ("passed", "failed", "skipped", "blocked",
                      "total_validations", "pass_rate_pct"))
-
-    layer_rows = ""
-    if not ls.empty:
-        layer_rows = "".join(
-            "<tr>" + "".join(f"<td>{v}</td>" for v in row) + "</tr>"
-            for row in ls.itertuples(index=False))
-
-    detail_rows = []
-    for _, r in df.iterrows():
-        cls = str(r.get("status", "")).lower()
-        detail_rows.append(
-            f"<tr class='{cls}'><td>{r.get('test_case_id','')}</td>"
-            f"<td>{r.get('layer','')}</td><td>{r.get('description','')}</td>"
-            f"<td>{r.get('risk_ref','')}</td><td>{r.get('expected','')}</td>"
-            f"<td>{r.get('actual','')}</td><td>{r.get('variance','')}</td>"
-            f"<td class='st'>{r.get('status','')}</td>"
-            f"<td>{r.get('severity','')}</td><td>{r.get('remarks','')}</td></tr>")
+    layer_rows = "".join("<tr>" + "".join(f"<td>{v}</td>" for v in row) + "</tr>"
+                         for row in ls.itertuples(index=False)) if not ls.empty else ""
+    detail_rows = "".join(
+        f"<tr class='{str(r.get('status','')).lower()}'><td>{r.get('test_case_id','')}</td>"
+        f"<td>{r.get('layer','')}</td><td>{r.get('description','')}</td>"
+        f"<td>{r.get('risk_ref','')}</td><td>{r.get('expected','')}</td>"
+        f"<td>{r.get('actual','')}</td><td>{r.get('variance','')}</td>"
+        f"<td class='st'>{r.get('status','')}</td>"
+        f"<td>{r.get('severity','')}</td><td>{r.get('remarks','')}</td></tr>"
+        for _, r in df.iterrows())
 
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Validation Execution Report</title><style>
@@ -196,7 +185,6 @@ tr.skipped td.st{{background:#D9D9D9;color:#595959;font-weight:bold;text-align:c
 </style></head><body>
 <h1>Validation Execution Report</h1>
 <div class="sub">Python QA Automation &middot; Financial Services Sales Data Pipeline</div>
-
 <h2>Execution Summary</h2>
 <table class="meta">{meta_rows}</table>
 <div class="cards">
@@ -207,25 +195,20 @@ tr.skipped td.st{{background:#D9D9D9;color:#595959;font-weight:bold;text-align:c
 <div class="card blocked"><div class="n">{s['blocked']}</div><div class="l">Blocked</div></div>
 <div class="card"><div class="n">{s['pass_rate_pct']}%</div><div class="l">Pass Rate</div></div>
 </div>
-
 <h2>Layer-wise Results</h2>
 <table><thead><tr><th>Layer</th><th>Total</th><th>Passed</th><th>Failed</th>
 <th>Skipped</th><th>Blocked</th><th>Pass Rate %</th></tr></thead>
 <tbody>{layer_rows}</tbody></table>
-
 <h2>Detailed Results</h2>
 <table><thead><tr><th>Validation ID</th><th>Layer</th><th>Description</th><th>Risk Ref</th>
 <th>Expected</th><th>Actual</th><th>Variance</th><th>Status</th><th>Severity</th>
-<th>Remarks</th></tr></thead>
-<tbody>{''.join(detail_rows)}</tbody></table>
+<th>Remarks</th></tr></thead><tbody>{detail_rows}</tbody></table>
 </body></html>"""
-
     path.write_text(html, encoding="utf-8")
     log.info("HTML validation report written: %s", path)
     return path
 
 
-# ---------------------------------------------------------------- console
 def print_console(results, business_date=None):
     s = summarise(results, business_date)
     print("\n" + "=" * 82)

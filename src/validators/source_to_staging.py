@@ -1,9 +1,9 @@
-"""Layer 1 validators - Source to Staging + master/reference data quality.
+"""Layer 1 - Source to Staging, plus master/reference data quality.
 
 Schema notes (02CreateTables.sql):
-  * status column is 'transaction_status' everywhere
+  * the status column is 'transaction_status' everywhere
   * retail_sales_raw and online_sales_raw already use 'transaction_id'
-  * distributor_sales_raw.distributor_txn_id -> stg_distributor_sales.transaction_id
+  * only distributor_sales_raw.distributor_txn_id is renamed on load
   * master/reference tables live in fs_source_retail
   * branch_region_mapping_raw is the region reference (no zone_name)
   * there is no distributor_master table
@@ -27,86 +27,89 @@ class SourceToStagingValidator(BaseValidator):
         self.rules = rules
         self.cfg = load_config("source_config")
 
-    def _safe_query(self, alias, sql, params=None):
-        """Return None (-> BLOCKED downstream) when the query cannot execute."""
+    def _q(self, alias, sql, params=None):
+        """Query returning None on failure, so callers can mark BLOCKED."""
         try:
             return self.db.query(alias, sql, params)
         except Exception as exc:
             log.error("Query failed on %s: %s", alias, exc)
             return None
 
+    @staticmethod
+    def _filter_status(df, col, values):
+        if df is None or df.empty or col not in df.columns:
+            return pd.DataFrame()
+        wanted = {v.upper() for v in values}
+        return df[df[col].astype(str).str.upper().isin(wanted)]
+
     # ==================== RETAIL ====================
     def run_retail(self, business_date, use_csv=False):
         cfg = self.cfg["retail"]
-        tbl, sc = cfg["staging_table"], cfg["status_column"]
+        tbl, sc, pk = cfg["staging_table"], cfg["status_column"], cfg["primary_key"]
         results = []
 
         if use_csv and self.file is not None:
             try:
                 src_all = self.file.read()
+                if "sale_date" in src_all.columns:
+                    src_all = src_all[src_all["sale_date"].astype(str) == str(business_date)]
             except Exception as exc:
                 log.error("Retail CSV read failed: %s", exc)
                 src_all = None
         else:
-            src_all = self._safe_query(
-                cfg["source_db"], f"SELECT * FROM {cfg['source_table']} WHERE sale_date = :d",
-                {"d": business_date})
-        stg = self._safe_query("staging", f"SELECT * FROM {tbl} WHERE sale_date = :d",
-                               {"d": business_date})
-
+            src_all = self._q(cfg["source_db"],
+                              f"SELECT * FROM {cfg['source_table']} WHERE sale_date = :d",
+                              {"d": business_date})
+        stg = self._q("staging", f"SELECT * FROM {tbl} WHERE sale_date = :d",
+                      {"d": business_date})
         blocked = src_all is None or stg is None
-        src_ok = pd.DataFrame() if blocked else src_all[
-            src_all[sc].astype(str).str.upper() == "COMPLETED"]
+        src_ok = self._filter_status(src_all, sc, cfg["status_filter"])
 
-        r = self._res("RET-V01", LAYER, "Retail COMPLETED source count vs staging count",
-                      source_object=cfg["source_table"], target_object=tbl,
-                      severity="Critical", risk_ref="R-SS-01")
         if blocked:
-            results.append(self._blocked(r, "Source or staging table could not be read"))
+            results.append(self._blocked(
+                self._res("RET-V01", LAYER, "Retail COMPLETED source count vs staging count",
+                          source_object=cfg["source_table"], target_object=tbl,
+                          severity="Critical", risk_ref="R-SS-01"),
+                "Source or staging table could not be read"))
         else:
             results.append(self.validate_count(
                 "RET-V01", LAYER, "Retail COMPLETED source count vs staging count",
                 len(src_ok), len(stg), cfg["source_table"], tbl, "Critical", "R-SS-01"))
 
-        cancelled = pd.DataFrame() if blocked else src_all[
-            src_all[sc].astype(str).str.upper() == "CANCELLED"]
+        excluded = self._filter_status(src_all, sc, cfg["excluded_status"])
         leaked = None if blocked else (
-            stg[stg["transaction_id"].isin(cancelled["transaction_id"])]
-            if not cancelled.empty else pd.DataFrame())
+            stg[stg[pk].isin(excluded[pk])] if not excluded.empty else pd.DataFrame())
         results.append(self.validate_empty(
             "RET-V02", LAYER, "CANCELLED retail transactions must not reach staging",
             leaked, cfg["source_table"], tbl, "Critical", "R-SS-03"))
 
         results.append(self.validate_duplicates(
             "RET-V03", LAYER, "Duplicate transaction_id in retail staging",
-            stg, "transaction_id", tbl, "High", "R-SS-02"))
+            stg, pk, tbl, "High", "R-SS-02"))
 
         if blocked:
-            rk = self._res("RET-V04", LAYER,
-                           "All COMPLETED retail transaction_ids present in staging",
-                           source_object=f"{cfg['source_table']}.transaction_id",
-                           target_object=f"{tbl}.transaction_id",
-                           severity="High", risk_ref="R-SS-04")
-            results.append(self._blocked(rk, "Source or staging table could not be read"))
+            results.append(self._blocked(
+                self._res("RET-V04", LAYER,
+                          "All COMPLETED retail transaction_ids present in staging",
+                          source_object=f"{cfg['source_table']}.{pk}",
+                          target_object=f"{tbl}.{pk}", severity="High", risk_ref="R-SS-04"),
+                "Source or staging table could not be read"))
         else:
             results.append(self.validate_key_sets(
                 "RET-V04", LAYER, "All COMPLETED retail transaction_ids present in staging",
-                src_ok["transaction_id"].tolist(), stg["transaction_id"].tolist(),
-                f"{cfg['source_table']}.transaction_id", f"{tbl}.transaction_id",
-                "High", "R-SS-04"))
+                src_ok[pk].tolist(), stg[pk].tolist(),
+                f"{cfg['source_table']}.{pk}", f"{tbl}.{pk}", "High", "R-SS-04"))
 
         results.append(self.validate_not_null(
             "RET-V05", LAYER, "Mandatory fields not null in retail staging",
             stg, cfg["mandatory_fields"], tbl, "High", "R-SS-05"))
-
         results.append(self._schema_check("RET-V06", src_all, cfg["expected_columns"],
                                           cfg["source_table"]))
-        results.append(self._datatypes("RET-V07", src_ok if not blocked else None,
+        results.append(self._datatypes("RET-V07", None if blocked else src_ok,
                                        cfg["source_table"]))
-
         results.append(self.validate_field_match(
             "RET-V08", LAYER, "Retail field-level comparison source vs staging",
-            None if blocked else src_ok, stg, "transaction_id", cfg["compare_columns"],
+            None if blocked else src_ok, stg, pk, cfg["compare_columns"],
             cfg["source_table"], tbl, "High", "R-SS-09"))
 
         bad_dates = None if blocked else src_ok[
@@ -114,7 +117,6 @@ class SourceToStagingValidator(BaseValidator):
         results.append(self.validate_empty(
             "RET-V09", LAYER, "All retail sale_date values match the business date",
             bad_dates, cfg["source_table"], "", "Medium", "R-SS-10"))
-
         results.append(self._batch_tag("RET-V10", stg, tbl))
         return results
 
@@ -125,27 +127,26 @@ class SourceToStagingValidator(BaseValidator):
         pk_s, pk_t = cfg["primary_key_source"], cfg["primary_key_target"]
         results = []
 
-        src = self._safe_query(cfg["source_db"],
-                               f"SELECT * FROM {cfg['source_table']} WHERE sale_date = :d",
-                               {"d": business_date})
-        stg = self._safe_query("staging", f"SELECT * FROM {tbl} WHERE sale_date = :d",
-                               {"d": business_date})
+        src = self._q(cfg["source_db"],
+                      f"SELECT * FROM {cfg['source_table']} WHERE sale_date = :d",
+                      {"d": business_date})
+        stg = self._q("staging", f"SELECT * FROM {tbl} WHERE sale_date = :d",
+                      {"d": business_date})
         blocked = src is None or stg is None
-        src_ok = pd.DataFrame() if blocked else src[
-            src[sc].astype(str).str.upper() == "APPROVED"]
+        src_ok = self._filter_status(src, sc, cfg["status_filter"])
 
         if blocked:
-            r = self._res("DST-V01", LAYER, "Distributor APPROVED count vs staging count",
+            results.append(self._blocked(
+                self._res("DST-V01", LAYER, "Distributor APPROVED count vs staging count",
                           source_object=cfg["source_table"], target_object=tbl,
-                          severity="Critical", risk_ref="R-SS-01")
-            results.append(self._blocked(r, "Source or staging table could not be read"))
+                          severity="Critical", risk_ref="R-SS-01"),
+                "Source or staging table could not be read"))
         else:
             results.append(self.validate_count(
                 "DST-V01", LAYER, "Distributor APPROVED count vs staging count",
                 len(src_ok), len(stg), cfg["source_table"], tbl, "Critical", "R-SS-01"))
 
-        excluded = pd.DataFrame() if blocked else src[
-            src[sc].astype(str).str.upper().isin([s.upper() for s in cfg["excluded_status"]])]
+        excluded = self._filter_status(src, sc, cfg["excluded_status"])
         leaked = None if blocked else (
             stg[stg[pk_t].isin(excluded[pk_s])] if not excluded.empty else pd.DataFrame())
         results.append(self.validate_empty(
@@ -153,14 +154,15 @@ class SourceToStagingValidator(BaseValidator):
             leaked, cfg["source_table"], tbl, "Critical", "R-SS-03"))
 
         if blocked:
-            rk = self._res("DST-V03", LAYER,
-                           "distributor_txn_id -> transaction_id rename preserves values",
-                           source_object=f"{cfg['source_table']}.{pk_s}",
-                           target_object=f"{tbl}.{pk_t}", severity="High", risk_ref="R-SS-04")
-            results.append(self._blocked(rk, "Source or staging table could not be read"))
+            results.append(self._blocked(
+                self._res("DST-V03", LAYER,
+                          "distributor_txn_id to transaction_id rename preserves values",
+                          source_object=f"{cfg['source_table']}.{pk_s}",
+                          target_object=f"{tbl}.{pk_t}", severity="High", risk_ref="R-SS-04"),
+                "Source or staging table could not be read"))
         else:
             results.append(self.validate_key_sets(
-                "DST-V03", LAYER, "distributor_txn_id -> transaction_id rename preserves values",
+                "DST-V03", LAYER, "distributor_txn_id to transaction_id rename preserves values",
                 src_ok[pk_s].tolist(), stg[pk_t].tolist(),
                 f"{cfg['source_table']}.{pk_s}", f"{tbl}.{pk_t}", "High", "R-SS-04"))
 
@@ -169,29 +171,27 @@ class SourceToStagingValidator(BaseValidator):
             "DST-V05", LAYER, "Duplicate transaction_id in distributor staging",
             stg, pk_t, tbl, "High", "R-SS-02"))
 
-        src_cmp = None if blocked else src_ok.rename(columns={pk_s: pk_t}).copy()
+        src_cmp = None if blocked or src_ok.empty else src_ok.rename(columns={pk_s: pk_t})
         results.append(self.validate_field_match(
             "DST-V06", LAYER, "Distributor field-level comparison source vs staging",
             src_cmp, stg, pk_t, cfg["compare_columns"],
             cfg["source_table"], tbl, "High", "R-SS-09"))
-
         results.append(self._commission_rule(stg, tbl))
 
-        rm = self._safe_query("source_retail",
-                              "SELECT DISTINCT region_name FROM branch_region_mapping_raw")
+        rm = self._q("source_retail",
+                     "SELECT DISTINCT region_name FROM branch_region_mapping_raw")
         results.append(self.validate_reference_integrity(
             "DST-V09", LAYER, "Distributor region_code resolves to a known region",
             [] if stg is None else stg["region_code"].dropna().tolist(),
             [] if rm is None else rm["region_name"].tolist(),
             f"{tbl}.region_code", "branch_region_mapping_raw.region_name", "High", "R-DQ-04"))
-
         results.append(self._batch_tag("DST-V10", stg, tbl))
         return results
 
     # ==================== ONLINE ====================
     def run_online(self, business_date, from_date=None, to_date=None):
         cfg = self.cfg["online"]
-        tbl, sc = cfg["staging_table"], cfg["status_column"]
+        tbl, sc, pk = cfg["staging_table"], cfg["status_column"], cfg["primary_key"]
         from_date, to_date = from_date or business_date, to_date or business_date
         results = [self._api_health(), self._api_auth()]
 
@@ -204,57 +204,54 @@ class SourceToStagingValidator(BaseValidator):
         results.append(self._pagination(api_df, total_reported, api_failed))
         results.append(self._json_schema(api_df, api_failed))
 
-        src = self._safe_query(cfg["source_db"],
-                               f"SELECT * FROM {cfg['source_table']} WHERE sale_date = :d",
-                               {"d": business_date})
-        stg = self._safe_query("staging", f"SELECT * FROM {tbl} WHERE sale_date = :d",
-                               {"d": business_date})
+        src = self._q(cfg["source_db"],
+                      f"SELECT * FROM {cfg['source_table']} WHERE sale_date = :d",
+                      {"d": business_date})
+        stg = self._q("staging", f"SELECT * FROM {tbl} WHERE sale_date = :d",
+                      {"d": business_date})
         blocked = src is None or stg is None
-        src_ok = pd.DataFrame() if blocked else src[
-            src[sc].astype(str).str.upper() == "COMPLETED"]
+        src_ok = self._filter_status(src, sc, cfg["status_filter"])
 
         if blocked:
-            r = self._res("ONL-V05", LAYER, "Online COMPLETED source count vs staging count",
+            results.append(self._blocked(
+                self._res("ONL-V05", LAYER, "Online COMPLETED source count vs staging count",
                           source_object=cfg["source_table"], target_object=tbl,
-                          severity="Critical", risk_ref="R-SS-01")
-            results.append(self._blocked(r, "Source or staging table could not be read"))
+                          severity="Critical", risk_ref="R-SS-01"),
+                "Source or staging table could not be read"))
         else:
             results.append(self.validate_count(
                 "ONL-V05", LAYER, "Online COMPLETED source count vs staging count",
                 len(src_ok), len(stg), cfg["source_table"], tbl, "Critical", "R-SS-01"))
 
-        excluded = pd.DataFrame() if blocked else src[
-            src[sc].astype(str).str.upper().isin([s.upper() for s in cfg["excluded_status"]])]
+        excluded = self._filter_status(src, sc, cfg["excluded_status"])
         leaked = None if blocked else (
-            stg[stg["transaction_id"].isin(excluded["transaction_id"])]
-            if not excluded.empty else pd.DataFrame())
+            stg[stg[pk].isin(excluded[pk])] if not excluded.empty else pd.DataFrame())
         results.append(self.validate_empty(
-            "ONL-V06", LAYER, "PENDING/FAILED online transactions must not reach staging",
+            "ONL-V06", LAYER, "PENDING or FAILED online transactions must not reach staging",
             leaked, cfg["source_table"], tbl, "Critical", "R-SS-03"))
 
         results.append(self.validate_duplicates(
             "ONL-V07", LAYER, "Duplicate transaction_id in online staging",
-            stg, "transaction_id", tbl, "High", "R-SS-02"))
-
+            stg, pk, tbl, "High", "R-SS-02"))
         results.append(self.validate_field_match(
             "ONL-V08", LAYER, "Online field-level comparison source vs staging",
-            None if blocked else src_ok, stg, "transaction_id", cfg["compare_columns"],
+            None if blocked else src_ok, stg, pk, cfg["compare_columns"],
             cfg["source_table"], tbl, "High", "R-SS-09"))
-
         results.append(self._date_range(api_df, from_date, to_date, api_failed))
         return results
 
     # ==================== MASTER / REFERENCE ====================
-    def run_master(self):
+    def run_master(self, business_date=None):
+        """Master load completeness and data quality.
+
+        `business_date` scopes the transactional side of the orphan checks so
+        the suite never scans whole staging tables on production volumes.
+        """
         results = []
         m = self.cfg["master"]
         for tc, spec, label in (("MST-V01", m["customer"], "Customer master"),
                                 ("MST-V06", m["product"], "Product master"),
                                 ("MST-V08", m["branch_region"], "Branch/region mapping")):
-            r = self._res(tc, LAYER, f"{label} load completeness source vs staging",
-                          source_object=spec["source_table"],
-                          target_object=spec["staging_table"],
-                          severity="High", risk_ref="R-DQ-01")
             try:
                 src_n = self.db.count(spec["source_db"], spec["source_table"])
                 stg_n = self.db.count("staging", spec["staging_table"])
@@ -263,11 +260,16 @@ class SourceToStagingValidator(BaseValidator):
                     src_n, stg_n, spec["source_table"], spec["staging_table"],
                     "High", "R-DQ-01"))
             except Exception as exc:
-                results.append(self._blocked(r, f"Count failed: {type(exc).__name__}"))
+                results.append(self._blocked(
+                    self._res(tc, LAYER, f"{label} load completeness source vs staging",
+                              source_object=spec["source_table"],
+                              target_object=spec["staging_table"],
+                              severity="High", risk_ref="R-DQ-01"),
+                    f"Count failed: {type(exc).__name__}"))
 
-        cust = self._safe_query("source_retail",
-                                "SELECT customer_id, customer_name, dob, state, mobile, "
-                                "email, kyc_status FROM customer_master_raw")
+        cust = self._q("source_retail",
+                       "SELECT customer_id, customer_name, dob, state, mobile, "
+                       "email, kyc_status FROM customer_master_raw")
         results.append(self.validate_pattern(
             "MST-V02", DQ, "Customer mobile is a valid 10-digit Indian number",
             cust, "mobile", self.rules["patterns"]["mobile"],
@@ -275,19 +277,18 @@ class SourceToStagingValidator(BaseValidator):
         results.append(self._state_normalisation(cust))
         results.append(self._dob_plausibility(cust))
 
-        prod = self._safe_query("source_retail",
-                                "SELECT product_code, standard_product_name, "
-                                "standard_product_type, product_category, active_flag "
-                                "FROM product_master_raw")
+        prod = self._q("source_retail",
+                       "SELECT product_code, standard_product_name, standard_product_type, "
+                       "product_category, active_flag FROM product_master_raw")
         results.append(self.validate_domain(
             "MST-V07", DQ, "standard_product_type only INSURANCE or MUTUAL_FUND",
             prod, "standard_product_type",
             self.rules["allowed_values"]["standard_product_type"],
             "product_master_raw", "High", "R-DQ-08"))
 
-        rm = self._safe_query("source_retail",
-                              "SELECT branch_code, branch_name, city, state, region_name, "
-                              "active_flag FROM branch_region_mapping_raw")
+        rm = self._q("source_retail",
+                     "SELECT branch_code, branch_name, city, state, region_name, "
+                     "active_flag FROM branch_region_mapping_raw")
         results.append(self.validate_domain(
             "MST-V09", DQ, "region_name within the allowed region domain",
             rm, "region_name", self.rules["allowed_values"]["region_name"],
@@ -295,17 +296,18 @@ class SourceToStagingValidator(BaseValidator):
 
         results.append(self._orphans("MST-V10", "product_code",
                                      [] if prod is None else prod["product_code"].tolist(),
-                                     "product_master_raw", "R-DQ-04"))
+                                     "product_master_raw", "R-DQ-04", business_date))
         results.append(self._orphans("MST-V11", "customer_id",
                                      [] if cust is None else cust["customer_id"].tolist(),
-                                     "customer_master_raw", "R-DQ-05"))
-        results.append(self._branch_orphans([] if rm is None else rm["branch_code"].tolist()))
-        results.append(self._conditional_mandatory())
+                                     "customer_master_raw", "R-DQ-05", business_date))
+        results.append(self._branch_orphans(
+            [] if rm is None else rm["branch_code"].tolist(), business_date))
+        results.append(self._conditional_mandatory(business_date))
         return results
 
     # ==================== helpers ====================
     def _schema_check(self, tc, df, expected, obj):
-        res = self._res(tc, LAYER, "Retail source schema matches expected column list",
+        res = self._res(tc, LAYER, "Retail source schema matches the expected column list",
                         source_object=obj, expected=len(expected),
                         severity="Medium", risk_ref="R-SS-07")
         if df is None:
@@ -328,6 +330,10 @@ class SourceToStagingValidator(BaseValidator):
             return self._blocked(res, "Source object could not be read")
         if df.empty:
             return self._skipped(res, "No rows for the business date")
+        required = ["sale_date", "gross_amount", "discount_amount"]
+        absent = [c for c in required if c not in df.columns]
+        if absent:
+            return self._blocked(res, f"Column(s) absent from source: {absent}")
         issues = {}
         dates = pd.to_datetime(df["sale_date"], errors="coerce")
         if dates.isna().any():
@@ -338,13 +344,13 @@ class SourceToStagingValidator(BaseValidator):
         if (gross.dropna() <= 0).any():
             issues["gross_not_positive"] = int((gross.dropna() <= 0).sum())
         disc = pd.to_numeric(df["discount_amount"], errors="coerce")
-        bad = ((disc.notna()) & (gross.notna()) & (disc >= gross)).sum()
+        bad = int(((disc.notna()) & (gross.notna()) & (disc >= gross)).sum())
         if bad:
-            issues["discount_ge_gross"] = int(bad)
+            issues["discount_ge_gross"] = bad
         res.actual = sum(issues.values())
         res.failed_sample = list(issues.items())
         res.status = "PASS" if not issues else "FAIL"
-        res.message = f"data-type/business-rule issues: {issues or 'none'}"
+        res.message = f"data-type or business-rule issues: {issues or 'none'}"
         res.compute_variance()
         log.info("[%s] %s - %s", tc, res.status, res.message)
         return res
@@ -381,7 +387,7 @@ class SourceToStagingValidator(BaseValidator):
         res.actual = f"{n} null customer_id ({pct}%)"
         res.status = "PASS"
         res.message = (f"{n} null customer_id row(s) flagged ({pct}%) - "
-                       f"must be excluded from the data mart")
+                       f"must be excluded from the data mart (see DM-V15)")
         res.failed_sample = stg[stg["customer_id"].isna()]["transaction_id"].head(10).tolist()
         res.compute_variance()
         log.info("[DST-V04] %s - %s", res.status, res.message)
@@ -443,7 +449,7 @@ class SourceToStagingValidator(BaseValidator):
         res = self._res("ONL-V03", LAYER,
                         "All API pages retrieved - collected rows equal total_records",
                         source_object="/api/online-sales", expected=total_reported,
-                        actual=len(df) if df is not None else None,
+                        actual=None if df is None else len(df),
                         severity="Critical", risk_ref="R-SS-06")
         if api_failed:
             return self._blocked(res, "API extraction failed - pagination not verified")
@@ -461,7 +467,7 @@ class SourceToStagingValidator(BaseValidator):
                     "discount_amount", "transaction_status", "region_code",
                     "payment_mode", "created_at"]
         res = self._res("ONL-V04", LAYER,
-                        "API JSON response conforms to online_sales_raw schema",
+                        "API JSON response conforms to the online_sales_raw schema",
                         source_object="/api/online-sales", expected=len(expected),
                         severity="Medium", risk_ref="R-SS-16")
         if api_failed:
@@ -500,8 +506,7 @@ class SourceToStagingValidator(BaseValidator):
                         source_object="customer_master_raw.state",
                         target_object="branch_region_mapping_raw.state",
                         expected=0, severity="High", risk_ref="R-DQ-03")
-        rm = self._safe_query("source_retail",
-                              "SELECT DISTINCT state FROM branch_region_mapping_raw")
+        rm = self._q("source_retail", "SELECT DISTINCT state FROM branch_region_mapping_raw")
         if cust is None or rm is None:
             return self._blocked(res, "Customer master or region mapping could not be read")
         if cust.empty or rm.empty:
@@ -541,64 +546,82 @@ class SourceToStagingValidator(BaseValidator):
         log.info("[MST-V05] %s - %s", res.status, res.message)
         return res
 
-    def _staging_union(self, column):
+    def _staging_union(self, column, business_date=None):
+        """DISTINCT values of `column` across staging, scoped to the date in SQL."""
         frames = []
         for t in ("stg_retail_sales", "stg_distributor_sales", "stg_online_sales"):
-            df = self._safe_query("staging", f"SELECT {column} FROM {t}")
+            sql = f"SELECT DISTINCT {column} FROM {t} WHERE {column} IS NOT NULL"
+            params = None
+            if business_date:
+                sql += " AND sale_date = :d"
+                params = {"d": business_date}
+            df = self._q("staging", sql, params)
             if df is not None:
                 frames.append(df)
-        return pd.concat(frames, ignore_index=True) if frames else None
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True).drop_duplicates()
 
-    def _orphans(self, tc, column, parent_values, parent_obj, risk):
-        child = self._staging_union(column)
-        res = self._res(tc, DQ, f"Every staging {column} exists in {parent_obj}",
-                        source_object=f"stg_* {column}", target_object=parent_obj,
-                        expected=0, severity="High", risk_ref=risk)
+    def _orphans(self, tc, column, parent_values, parent_obj, risk, business_date=None):
+        child = self._staging_union(column, business_date)
         if child is None:
-            return self._blocked(res, "Staging tables could not be read")
+            return self._blocked(
+                self._res(tc, DQ, f"Every staging {column} exists in {parent_obj}",
+                          source_object=f"stg_* {column}", target_object=parent_obj,
+                          expected=0, severity="High", risk_ref=risk),
+                "Staging tables could not be read")
         return self.validate_reference_integrity(
             tc, DQ, f"Every staging {column} exists in {parent_obj}",
             child[column].dropna().tolist(), parent_values,
             f"stg_* {column}", parent_obj, "High", risk)
 
-    def _branch_orphans(self, parent_values):
-        stg = self._safe_query("staging", "SELECT branch_code FROM stg_retail_sales")
-        res = self._res("MST-V13", DQ,
-                        "Every retail branch_code exists in branch/region mapping",
-                        source_object="stg_retail_sales.branch_code",
-                        target_object="branch_region_mapping_raw.branch_code",
-                        expected=0, severity="High", risk_ref="R-DQ-04")
+    def _branch_orphans(self, parent_values, business_date=None):
+        sql = "SELECT DISTINCT branch_code FROM stg_retail_sales WHERE branch_code IS NOT NULL"
+        params = None
+        if business_date:
+            sql += " AND sale_date = :d"
+            params = {"d": business_date}
+        stg = self._q("staging", sql, params)
         if stg is None:
-            return self._blocked(res, "Retail staging table could not be read")
+            return self._blocked(
+                self._res("MST-V13", DQ,
+                          "Every retail branch_code exists in the branch/region mapping",
+                          source_object="stg_retail_sales.branch_code",
+                          target_object="branch_region_mapping_raw.branch_code",
+                          expected=0, severity="High", risk_ref="R-DQ-04"),
+                "Retail staging table could not be read")
         return self.validate_reference_integrity(
-            "MST-V13", DQ, "Every retail branch_code exists in branch/region mapping",
+            "MST-V13", DQ, "Every retail branch_code exists in the branch/region mapping",
             stg["branch_code"].dropna().tolist(), parent_values,
             "stg_retail_sales.branch_code", "branch_region_mapping_raw.branch_code",
             "High", "R-DQ-04")
 
-    def _conditional_mandatory(self):
+    def _conditional_mandatory(self, business_date=None):
         res = self._res("MST-V12", DQ,
                         "policy_number for INSURANCE and folio_number for MUTUAL_FUND populated",
                         source_object="stg_retail_sales / stg_distributor_sales",
                         target_object="product_master_raw", expected=0,
                         severity="Medium", risk_ref="R-DQ-10")
-        prod = self._safe_query("source_retail",
-                                "SELECT product_code, standard_product_type FROM product_master_raw")
+        prod = self._q("source_retail",
+                       "SELECT product_code, standard_product_type FROM product_master_raw")
         if prod is None:
             return self._blocked(res, "Product master could not be read")
         breaches = {}
         for tbl in ("stg_retail_sales", "stg_distributor_sales"):
-            stg = self._safe_query(
-                "staging", f"SELECT product_code, policy_number, folio_number FROM {tbl}")
+            sql = f"SELECT product_code, policy_number, folio_number FROM {tbl}"
+            params = None
+            if business_date:
+                sql += " WHERE sale_date = :d"
+                params = {"d": business_date}
+            stg = self._q("staging", sql, params)
             if stg is None:
                 return self._blocked(res, f"{tbl} could not be read")
             if stg.empty or prod.empty:
                 continue
             m = stg.merge(prod, on="product_code", how="left")
-            n_ins = int(m[m["standard_product_type"].astype(str).str.upper() == "INSURANCE"]
-                        ["policy_number"].isna().sum())
-            n_mf = int(m[m["standard_product_type"].astype(str).str.upper() == "MUTUAL_FUND"]
-                       ["folio_number"].isna().sum())
+            t = m["standard_product_type"].astype(str).str.upper()
+            n_ins = int(m[t == "INSURANCE"]["policy_number"].isna().sum())
+            n_mf = int(m[t == "MUTUAL_FUND"]["folio_number"].isna().sum())
             if n_ins:
                 breaches[f"{tbl}.policy_number"] = n_ins
             if n_mf:

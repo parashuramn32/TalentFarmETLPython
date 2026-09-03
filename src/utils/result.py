@@ -1,26 +1,24 @@
 """Validation result model.
 
-Submission 3 alignment (Assignment 3, Section 5):
-  * Detailed results must show validation ID, expected value, actual value,
-    VARIANCE, status and remarks  -> `variance` / `variance_pct` added.
-  * The execution summary must count passed, failed, skipped and BLOCKED
-    validations -> BLOCKED added to the status vocabulary.
+Assignment 3 (Section 5) requires detailed results to carry validation ID,
+expected, actual, VARIANCE, status and remarks, and the execution summary to
+count passed / failed / skipped / BLOCKED.
 """
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any, Optional
 
-# Status vocabulary
 PASS = "PASS"
 FAIL = "FAIL"
 SKIPPED = "SKIPPED"
-BLOCKED = "BLOCKED"      # could not execute (environment/access/dependency failure)
+BLOCKED = "BLOCKED"        # could not execute: environment, access or missing object
 NOT_RUN = "NOT_RUN"
 
 STATUSES = (PASS, FAIL, SKIPPED, BLOCKED, NOT_RUN)
+NOT_EVALUATED = "Not evaluated"
 
 
-def _as_number(value):
+def as_number(value):
     """Best-effort numeric coercion; returns None when not numeric."""
     if value is None or isinstance(value, bool):
         return None
@@ -46,20 +44,16 @@ class ValidationResult:
     risk_ref: str = ""
     message: str = ""                       # rendered as "Remarks" in the report
     failed_sample: Optional[Any] = field(default=None)
-    variance: Any = None                    # actual - expected (numeric) or descriptive
-    variance_pct: Optional[float] = None    # variance as % of expected
+    variance: Any = None
+    variance_pct: Optional[float] = None
     environment: str = ""
     executed_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     duration_sec: float = 0.0
 
     # ---------------- variance ----------------
     def compute_variance(self):
-        """Derive variance from expected/actual.
-
-        Numeric pair  -> signed difference and percentage of expected.
-        Non-numeric   -> a short descriptive variance, or 'No variance' when equal.
-        """
-        exp_n, act_n = _as_number(self.expected), _as_number(self.actual)
+        """Signed difference for numeric pairs, descriptive text otherwise."""
+        exp_n, act_n = as_number(self.expected), as_number(self.actual)
 
         if exp_n is not None and act_n is not None:
             diff = round(act_n - exp_n, 4)
@@ -83,7 +77,7 @@ class ValidationResult:
         d = asdict(self)
         if d.get("failed_sample") is not None:
             d["failed_sample"] = str(d["failed_sample"])[:1000]
-        d["remarks"] = d.pop("message")     # Section 5 column name
+        d["remarks"] = d.pop("message")
         return d
 
     # ---------------- convenience ----------------
@@ -93,19 +87,17 @@ class ValidationResult:
 
     @property
     def is_defect(self):
-        """Only genuine failures become defects; blocked/skipped do not."""
+        """Only genuine failures become defects; blocked and skipped do not."""
         return self.status == FAIL
 
     def mark_blocked(self, reason):
-        """Validation could not be executed (env down, access denied, missing object)."""
         self.status = BLOCKED
         self.message = reason
-        self.variance = "Not evaluated"
+        self.variance = NOT_EVALUATED
         return self
 
     def mark_skipped(self, reason):
-        """Validation not applicable for this run (no data / optional column absent)."""
         self.status = SKIPPED
         self.message = reason
-        self.variance = "Not evaluated"
+        self.variance = NOT_EVALUATED
         return self

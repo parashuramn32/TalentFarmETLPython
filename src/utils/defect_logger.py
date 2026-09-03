@@ -1,13 +1,10 @@
 """Defect log generation (Assignment 3, Section 6).
 
-Converts FAILED validations into a structured defect log with the twelve
-required fields:
-
+Converts FAILED validations into a defect log with the twelve required fields:
   Defect ID | Layer | Title | Description | Expected | Actual | Source Object |
   Target Object | Severity | Evidence | Likely Root Cause | Business Impact
 
-Severity is normalised to the three-level scale defined in Section 8
-(High / Medium / Low) using `severity_map` in validation_rules.yaml.
+Severity is normalised to the three-level scale in Section 8 via `severity_map`.
 Only genuine FAIL results become defects - BLOCKED and SKIPPED do not.
 """
 from pathlib import Path
@@ -22,7 +19,6 @@ log = get_logger(__name__)
 REPORT_DIR = Path(__file__).resolve().parents[2] / "reports"
 REPORT_DIR.mkdir(exist_ok=True)
 
-# Layer -> defect ID prefix
 LAYER_CODE = {
     "Source-to-Staging": "STG",
     "Data Quality": "DQ",
@@ -32,36 +28,36 @@ LAYER_CODE = {
     "Regression": "REG",
 }
 
-# Risk family -> likely root cause (analysis, not raw output)
 ROOT_CAUSE = {
-    "R-SS-01": "Load filter or incremental window in the source-to-staging job is excluding "
+    "R-SS-01": "The load filter or incremental window in the source-to-staging job is excluding "
                "valid records, or the job did not process the full source set.",
     "R-SS-02": "The staging load is not idempotent - a re-run inserted the same natural key "
                "twice because the staging table has no primary key constraint.",
-    "R-SS-03": "The status filter in the staging load is missing or uses the wrong column/value, "
-               "so excluded transaction states are being loaded.",
-    "R-SS-04": "The distributor_txn_id to transaction_id rename is dropping or truncating values "
-               "during the load mapping.",
+    "R-SS-03": "The status filter in the staging load is missing or uses the wrong column or "
+               "value, so excluded transaction states are being loaded.",
+    "R-SS-04": "The distributor_txn_id to transaction_id rename is dropping or truncating "
+               "values during the load mapping.",
     "R-SS-05": "Mandatory-field enforcement is absent in the staging load; nulls from source "
-               "are passed through unchecked.",
-    "R-SS-06": "The API extraction stops after the first page - the pagination loop does not "
-               "iterate until total_records is reached.",
+               "pass through unchecked.",
+    "R-SS-06": "The API extraction stops early - the pagination loop does not iterate until "
+               "total_records is reached.",
     "R-SS-07": "The source structure changed without a corresponding change to the load mapping.",
     "R-SS-08": "Source data types are not validated or cast during extraction.",
     "R-SS-09": "Column mapping in the staging load is transposed or applies an unintended "
                "transformation.",
     "R-SS-10": "The load is picking up a file or partition for the wrong business date.",
     "R-SS-11": "Audit columns are not populated by the load job.",
-    "R-SS-13": "Commission calculation logic in the source application allows a value greater "
-               "than the sale amount.",
+    "R-SS-13": "Commission calculation in the source application allows a value greater than "
+               "the sale amount.",
     "R-SS-14": "The API service is down, misconfigured, or the endpoint has moved.",
     "R-SS-15": "API authentication is not enforced on the endpoint.",
     "R-SS-16": "The API contract changed and fields were renamed or removed.",
-    "R-SS-17": "Date filtering is applied after pagination, or the API ignores the date parameters.",
+    "R-SS-17": "Date filtering is applied after pagination, or the API ignores the date "
+               "parameters.",
     "R-DQ-01": "The master data load did not complete, or filtered rows that should be retained.",
     "R-DQ-02": "No format validation on mobile capture in the source application.",
-    "R-DQ-03": "Free-text state entry in the source system with no controlled vocabulary; the "
-               "normalisation dictionary does not cover all observed variants.",
+    "R-DQ-03": "Free-text state entry with no controlled vocabulary; the normalisation "
+               "dictionary does not cover all observed variants.",
     "R-DQ-04": "Reference data is stale relative to transactional data - new codes are in use "
                "before the master is refreshed.",
     "R-DQ-05": "Customer records are created after the transaction, or the customer master load "
@@ -73,21 +69,21 @@ ROOT_CAUSE = {
     "R-DQ-09": "Region reference maintained manually without a domain constraint.",
     "R-DQ-10": "Conditional mandatory rules are not enforced by product type at capture.",
     "R-DM-01": "The product harmonisation join is failing or the mapping table is out of date.",
-    "R-DM-02": "ULIP is being classified by name pattern rather than by the product master, so "
-               "it falls into the mutual fund branch of the transformation.",
-    "R-DM-03": "The transformation copies the raw product label instead of joining to the master "
-               "for the standardised name and category.",
+    "R-DM-02": "ULIP is classified by name pattern rather than by the product master, so it "
+               "falls into the mutual fund branch of the transformation.",
+    "R-DM-03": "The transformation copies the raw product label instead of joining to the "
+               "master for the standardised name and category.",
     "R-DM-04": "Channel derivation uses an unmapped or free-text source value.",
     "R-DM-05": "The branch/region join fails or falls through to a default before all mapping "
                "options are attempted.",
     "R-DM-06": "State normalisation runs before or without the full variant dictionary, so the "
                "region lookup misses.",
-    "R-DM-08": "Name cleansing (trim, salutation strip, title case) is not applied in the "
-               "transformation.",
+    "R-DM-08": "Name cleansing (trim, salutation strip, title case) is not applied, or is "
+               "applied in the wrong order, in the transformation.",
     "R-DM-09": "The customer master join is not applied for this channel.",
     "R-DM-10": "The net amount formula in the transformation does not match the agreed "
-               "definition (gross minus discount).",
-    "R-DM-11": "No active_flag check in the transformation or the source application allows "
+               "definition of gross minus discount.",
+    "R-DM-11": "No active_flag check in the transformation, or the source application allows "
                "sales against discontinued products.",
     "R-DM-12": "The transformation is filtering, duplicating or failing to load part of the "
                "valid staging set.",
@@ -108,8 +104,8 @@ ROOT_CAUSE = {
     "R-RP-01": "The dashboard query applies a different filter than the reporting view, or the "
                "page is caching a previous result.",
     "R-RP-02": "The filter parameter is not passed through to the underlying query.",
-    "R-RP-03": "The date range boundary in the report query is inclusive/exclusive in the wrong "
-               "direction.",
+    "R-RP-03": "The date range boundary in the report query is inclusive or exclusive in the "
+               "wrong direction.",
     "R-RP-04": "The reporting refresh did not run after the latest data mart load.",
     "R-RP-05": "The view definition adds a filter or join that was not present in the data mart "
                "table.",
@@ -126,19 +122,17 @@ DEFECT_COLS = ["Defect ID", "Layer", "Title", "Description", "Expected Value",
 
 
 def _evidence(result):
-    """Build a concise, reviewable evidence string (Section 7)."""
     parts = [f"Validation {result.test_case_id} failed during the run recorded in "
              f"{run_log_path().name}."]
     if result.message:
         parts.append(f"Result: {result.message}")
     if result.failed_sample:
-        sample = str(result.failed_sample)
-        parts.append(f"Sample offending rows: {sample[:400]}")
+        parts.append(f"Sample offending rows: {str(result.failed_sample)[:400]}")
+    parts.append(f"Full evidence: reports/evidence/{result.test_case_id}_FAIL.json")
     return " | ".join(parts)
 
 
 def build_defects(results, business_date=None):
-    """Convert FAILED validation results into defect records."""
     rules = load_rules()
     sev_map = rules.get("severity_map", {})
     impact_map = rules.get("business_impact", {})
@@ -156,8 +150,9 @@ def build_defects(results, business_date=None):
             "Defect ID": f"DEF-{code}-{counters[code]:03d}",
             "Layer": r.layer,
             "Title": r.description,
-            "Description": (f"Validation {r.test_case_id} compared {r.source_object or 'source'} "
-                            f"against {r.target_object or 'target'} for business date "
+            "Description": (f"Validation {r.test_case_id} compared "
+                            f"{r.source_object or 'source'} against "
+                            f"{r.target_object or 'target'} for business date "
                             f"{business_date or 'n/a'} and detected a mismatch. {r.message}"),
             "Expected Value": r.expected,
             "Actual Value": r.actual,
@@ -165,10 +160,10 @@ def build_defects(results, business_date=None):
             "Target Object": r.target_object,
             "Severity": sev_map.get(r.severity, r.severity),
             "Evidence": _evidence(r),
-            "Likely Root Cause": ROOT_CAUSE.get(risk, "Root cause to be confirmed with the "
-                                                      "development team during triage."),
-            "Business Impact": impact_map.get(risk, "Reported figures may be inaccurate for "
-                                                    "this metric."),
+            "Likely Root Cause": ROOT_CAUSE.get(
+                risk, "Root cause to be confirmed with the development team during triage."),
+            "Business Impact": impact_map.get(
+                risk, "Reported figures may be inaccurate for this metric."),
             "Validation ID": r.test_case_id,
             "Risk Reference": r.risk_ref,
             "Detected On": detected,
@@ -188,7 +183,6 @@ def severity_breakdown(defects):
 
 
 def to_excel(results, filename=None, business_date=None):
-    """Write the defect log workbook."""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
@@ -231,27 +225,27 @@ def to_excel(results, filename=None, business_date=None):
                                            wrap_text=True)
                 cell.border = border
             headers = [c.value for c in sheet[1]]
-            if "Severity" in headers:
-                idx = headers.index("Severity") + 1
-                for row in range(2, sheet.max_row + 1):
-                    c = sheet.cell(row, idx)
-                    key = str(c.value)
-                    if key in sev_fill:
-                        c.fill = PatternFill("solid", start_color=sev_fill[key])
-                        c.font = Font(bold=True, color=sev_font[key], size=9, name="Arial")
-                        c.alignment = Alignment(horizontal="center")
-            for i, col in enumerate(headers, 1):
-                width = (58 if col in ("Description", "Evidence", "Likely Root Cause",
-                                       "Business Impact") else
-                         38 if col == "Title" else
-                         26 if col in ("Source Object", "Target Object",
-                                       "Expected Value", "Actual Value", "Value") else 16)
-                sheet.column_dimensions[get_column_letter(i)].width = width
             for row in range(2, sheet.max_row + 1):
                 for c in sheet[row]:
                     c.alignment = Alignment(vertical="top", wrap_text=True)
                     c.font = Font(size=9, name="Arial")
                     c.border = border
+            if "Severity" in headers:
+                idx = headers.index("Severity") + 1
+                for row in range(2, sheet.max_row + 1):
+                    c = sheet.cell(row, idx)
+                    if str(c.value) in sev_fill:
+                        c.fill = PatternFill("solid", start_color=sev_fill[str(c.value)])
+                        c.font = Font(bold=True, color=sev_font[str(c.value)],
+                                      size=9, name="Arial")
+                        c.alignment = Alignment(horizontal="center")
+            for i, col in enumerate(headers, 1):
+                width = (58 if col in ("Description", "Evidence", "Likely Root Cause",
+                                       "Business Impact") else
+                         38 if col == "Title" else
+                         26 if col in ("Source Object", "Target Object", "Expected Value",
+                                       "Actual Value", "Value") else 16)
+                sheet.column_dimensions[get_column_letter(i)].width = width
             sheet.freeze_panes = "A2"
 
     log.info("Defect log written: %s (%s defects)", path, len(defects))

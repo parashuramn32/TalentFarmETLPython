@@ -1,7 +1,4 @@
-"""Central logging configuration - console + per-run file handler.
-
-The per-run log file is an Assignment 3 deliverable (Section 10, Execution Logs).
-"""
+"""Console + per-run file logging. The run log is an Assignment 3 deliverable."""
 import logging
 import sys
 from pathlib import Path
@@ -25,6 +22,7 @@ def get_logger(name="qa_automation"):
     fh = logging.FileHandler(RUN_LOG, encoding="utf-8")
     fh.setFormatter(logging.Formatter(_FMT))
     logger.addHandler(fh)
+    logger.propagate = False
     return logger
 
 

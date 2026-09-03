@@ -6,6 +6,6 @@ __pycache__/
 logs/*.log
 reports/validation_report_*
 reports/defect_log_*
-
+reports/Final_QA_Summary_*
+reports/evidence/
 tests/mock/*.db
-reports/mock_*

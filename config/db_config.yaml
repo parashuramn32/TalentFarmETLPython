@@ -1,5 +1,4 @@
-# Database configuration - read-only QA connections (learner_user)
-# Schemas verified against 01Cretaedatabase.sql
+# Read-only QA connections. Schemas verified against 01Cretaedatabase.sql
 mysql:
   host: ${DB_HOST}
   port: 3306

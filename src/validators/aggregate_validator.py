@@ -1,4 +1,17 @@
-"""Layer 3a validators - Aggregate / summary model correctness."""
+"""Layer 3a - Aggregate / summary model correctness.
+
+Column contract (02CreateTables.sql):
+  dm_sales_daily_summary    (sale_date PK, transaction_count, total_gross_sales_amount,
+                             total_net_sales_amount, total_insurance_premium,
+                             total_mutual_fund_sales, avg_ticket_size)
+  dm_sales_channel_summary  (sale_date, source_channel, standard_product_type, ...)
+  dm_sales_region_summary   (sale_date, region_name, standard_product_type, ...)
+  dm_sales_product_summary  (sale_date, product_code, standard_product_name,
+                             standard_product_type, product_category, ...)
+  dm_executive_sales_summary(sale_date PK, total_transactions, total_insurance_premium,
+                             total_mutual_fund_sales, total_net_sales_amount,
+                             avg_ticket_size, top_region, top_channel)
+"""
 import pandas as pd
 
 from src.validators.base_validator import BaseValidator
@@ -17,8 +30,9 @@ class AggregateValidator(BaseValidator):
         self.db, self.rules = db, rules
         self.s = rules["summary_columns"]
         self.e = rules["executive_columns"]
+        self.avg_tol = rules["tolerance"].get("average", 0.5)
 
-    def _safe_query(self, alias, sql, params=None):
+    def _q(self, alias, sql, params=None):
         try:
             return self.db.query(alias, sql, params)
         except Exception as exc:
@@ -33,12 +47,12 @@ class AggregateValidator(BaseValidator):
             return self._blocked(res, "Transaction detail or summary table could not be read")
         if expected_df.empty and actual_df.empty:
             return self._skipped(res, "No rows for the business date")
-        for df in (expected_df, actual_df):
+        exp, act = expected_df.copy(), actual_df.copy()
+        for df in (exp, act):
             for k in keys:
                 if k in df.columns:
                     df[k] = df[k].astype(str)
-        m = expected_df.merge(actual_df, on=keys, how="outer",
-                              suffixes=("_exp", "_act"), indicator=True)
+        m = exp.merge(act, on=keys, how="outer", suffixes=("_exp", "_act"), indicator=True)
         breaches = {}
         only = m[m["_merge"] != "both"]
         if not only.empty:
@@ -55,14 +69,14 @@ class AggregateValidator(BaseValidator):
         res.actual = sum(v for v in breaches.values() if isinstance(v, int))
         res.failed_sample = list(breaches.items())[:10]
         res.status = "PASS" if not breaches else "FAIL"
-        res.message = f"aggregate breaches: {breaches or 'none'}"
+        res.message = f"{len(m)} group(s) compared; breaches: {breaches or 'none'}"
         res.compute_variance()
         log.info("[%s] %s - %s", tc, res.status, res.message)
         return res
 
     def _avg_check(self, tc, act, obj):
         net, cnt, avg = self.s["net"], self.s["count"], self.s["avg"]
-        res = self._res(tc, LAYER, f"{avg} = {net} / {cnt} (zero-count safe)",
+        res = self._res(tc, LAYER, f"{avg} equals {net} divided by {cnt} (zero-count safe)",
                         source_object=obj, target_object=f"{obj}.{avg}",
                         expected=0, severity="High", risk_ref="R-AG-03")
         if act is None:
@@ -75,11 +89,11 @@ class AggregateValidator(BaseValidator):
         for c in (net, cnt, avg):
             a[c] = pd.to_numeric(a[c], errors="coerce").fillna(0)
         a["_exp"] = a.apply(lambda r: 0 if r[cnt] == 0 else r[net] / r[cnt], axis=1)
-        bad = a[(a["_exp"] - a[avg]).abs() > max(self.tolerance, 0.5)]
+        bad = a[(a["_exp"] - a[avg]).abs() > self.avg_tol]
         zero_div = a[a[cnt] == 0]
         res.actual = len(bad)
         res.status = "PASS" if bad.empty else "FAIL"
-        res.message = (f"{len(bad)} incorrect average(s); "
+        res.message = (f"{len(bad)} of {len(a)} incorrect average(s); "
                        f"{len(zero_div)} zero-count group(s) handled")
         res.compute_variance()
         log.info("[%s] %s - %s", tc, res.status, res.message)
@@ -87,35 +101,33 @@ class AggregateValidator(BaseValidator):
 
     def validate_region_summary(self, business_date):
         net, gross, cnt, avg = self.s["net"], self.s["gross"], self.s["count"], self.s["avg"]
-        exp = self._safe_query("datamart", f"""
+        exp = self._q("datamart", f"""
             SELECT sale_date, region_name, standard_product_type,
                    COUNT(*) AS {cnt}, SUM(gross_sales_amount) AS {gross},
                    SUM(net_sales_amount) AS {net}
             FROM {DM} WHERE sale_date = :d
             GROUP BY sale_date, region_name, standard_product_type
         """, {"d": business_date})
-        act = self._safe_query("datamart", f"""
+        act = self._q("datamart", f"""
             SELECT sale_date, region_name, standard_product_type, {cnt}, {gross}, {net}, {avg}
             FROM dm_sales_region_summary WHERE sale_date = :d
         """, {"d": business_date})
         return [self._compare_groups(
                     "AGG-V01", "Region summary sums and counts vs transaction level",
-                    None if exp is None else exp.copy(),
-                    None if act is None else act.copy(),
-                    ["sale_date", "region_name", "standard_product_type"],
+                    exp, act, ["sale_date", "region_name", "standard_product_type"],
                     [cnt, gross, net], "dm_sales_region_summary", "Critical", "R-AG-01"),
                 self._avg_check("AGG-V02", act, "dm_sales_region_summary")]
 
     def validate_channel_summary(self, business_date):
         net, gross, cnt = self.s["net"], self.s["gross"], self.s["count"]
-        exp = self._safe_query("datamart", f"""
+        exp = self._q("datamart", f"""
             SELECT sale_date, source_channel, standard_product_type,
                    COUNT(*) AS {cnt}, SUM(gross_sales_amount) AS {gross},
                    SUM(net_sales_amount) AS {net}
             FROM {DM} WHERE sale_date = :d
             GROUP BY sale_date, source_channel, standard_product_type
         """, {"d": business_date})
-        act = self._safe_query("datamart", f"""
+        act = self._q("datamart", f"""
             SELECT sale_date, source_channel, standard_product_type, {cnt}, {gross}, {net}
             FROM dm_sales_channel_summary WHERE sale_date = :d
         """, {"d": business_date})
@@ -126,14 +138,14 @@ class AggregateValidator(BaseValidator):
 
     def validate_product_summary(self, business_date):
         net, gross, cnt = self.s["net"], self.s["gross"], self.s["count"]
-        exp = self._safe_query("datamart", f"""
+        exp = self._q("datamart", f"""
             SELECT sale_date, product_code, standard_product_type,
                    COUNT(*) AS {cnt}, SUM(gross_sales_amount) AS {gross},
                    SUM(net_sales_amount) AS {net}
             FROM {DM} WHERE sale_date = :d
             GROUP BY sale_date, product_code, standard_product_type
         """, {"d": business_date})
-        act = self._safe_query("datamart", f"""
+        act = self._q("datamart", f"""
             SELECT sale_date, product_code, standard_product_type, {cnt}, {gross}, {net}
             FROM dm_sales_product_summary WHERE sale_date = :d
         """, {"d": business_date})
@@ -144,7 +156,7 @@ class AggregateValidator(BaseValidator):
 
     def validate_daily_summary(self, business_date):
         net, gross, cnt = self.s["net"], self.s["gross"], self.s["count"]
-        exp = self._safe_query("datamart", f"""
+        exp = self._q("datamart", f"""
             SELECT sale_date, COUNT(*) AS {cnt},
                    SUM(gross_sales_amount) AS {gross}, SUM(net_sales_amount) AS {net},
                    SUM(CASE WHEN standard_product_type='INSURANCE'
@@ -153,23 +165,24 @@ class AggregateValidator(BaseValidator):
                         THEN net_sales_amount ELSE 0 END) AS total_mutual_fund_sales
             FROM {DM} WHERE sale_date = :d GROUP BY sale_date
         """, {"d": business_date})
-        act = self._safe_query("datamart", f"""
+        act = self._q("datamart", f"""
             SELECT sale_date, {cnt}, {gross}, {net},
                    total_insurance_premium, total_mutual_fund_sales, avg_ticket_size
             FROM dm_sales_daily_summary WHERE sale_date = :d
         """, {"d": business_date})
         return [self._compare_groups(
                     "AGG-V05", "Daily summary totals and product split vs transaction level",
-                    None if exp is None else exp.copy(),
-                    None if act is None else act.copy(), ["sale_date"],
+                    exp, act, ["sale_date"],
                     [cnt, gross, net, "total_insurance_premium", "total_mutual_fund_sales"],
                     "dm_sales_daily_summary", "High", "R-AG-02"),
                 self._avg_check("AGG-V09", act, "dm_sales_daily_summary")]
 
     def validate_executive_summary(self, business_date):
+        """Each executive metric gets its own validation ID (AGG-V06a..e) so that
+        every reported row is individually traceable (Assignment 3, Section 5)."""
         results = []
         e = self.e
-        exp = self._safe_query("datamart", f"""
+        exp = self._q("datamart", f"""
             SELECT COUNT(*) AS {e['count']},
                    COALESCE(SUM(CASE WHEN standard_product_type='INSURANCE'
                         THEN net_sales_amount ELSE 0 END),0) AS {e['insurance']},
@@ -178,14 +191,13 @@ class AggregateValidator(BaseValidator):
                    COALESCE(SUM(net_sales_amount),0) AS {e['net']}
             FROM {DM} WHERE sale_date = :d
         """, {"d": business_date})
-        act = self._safe_query("datamart", f"""
+        act = self._q("datamart", f"""
             SELECT {e['count']}, {e['insurance']}, {e['mutual_fund']}, {e['net']},
                    {e['avg']}, {e['top_region']}, {e['top_channel']}
             FROM dm_executive_sales_summary WHERE sale_date = :d
         """, {"d": business_date})
 
-        base = self._res("AGG-V06", LAYER,
-                         "Executive summary metrics vs recomputed values",
+        base = self._res("AGG-V06a", LAYER, "Executive summary metrics vs recomputed values",
                          source_object=DM, target_object="dm_executive_sales_summary",
                          severity="Critical", risk_ref="R-AG-04")
         if exp is None or act is None:
@@ -194,27 +206,29 @@ class AggregateValidator(BaseValidator):
             return [self._skipped(base, "No executive summary row for the business date")]
 
         ex, ac = exp.iloc[0], act.iloc[0]
-        for metric, sev in ((e["net"], "Critical"), (e["insurance"], "Critical"),
-                            (e["mutual_fund"], "Critical"), (e["count"], "High")):
+        for tc, metric, sev in (("AGG-V06a", e["net"], "Critical"),
+                                ("AGG-V06b", e["insurance"], "Critical"),
+                                ("AGG-V06c", e["mutual_fund"], "Critical"),
+                                ("AGG-V06d", e["count"], "High")):
             results.append(self.validate_numeric(
-                "AGG-V06", LAYER, f"Executive metric '{metric}' matches recomputed value",
+                tc, LAYER, f"Executive metric '{metric}' matches the recomputed value",
                 float(ex[metric]), float(ac[metric]), DM,
                 "dm_executive_sales_summary", sev, "R-AG-04"))
 
         exp_avg = 0 if int(ex[e["count"]]) == 0 else float(ex[e["net"]]) / int(ex[e["count"]])
         results.append(self.validate_numeric(
-            "AGG-V06", LAYER, f"Executive '{e['avg']}' matches recomputed value",
+            "AGG-V06e", LAYER, f"Executive '{e['avg']}' matches the recomputed value",
             round(exp_avg, 2), float(ac[e["avg"]]), DM,
-            "dm_executive_sales_summary", "High", "R-AG-04", tolerance=0.5))
+            "dm_executive_sales_summary", "High", "R-AG-04", tolerance=self.avg_tol))
 
         res = self._res("AGG-V07", LAYER, "top_region and top_channel derived correctly",
                         source_object=DM, target_object="dm_executive_sales_summary",
                         severity="Medium", risk_ref="R-AG-05")
-        tr = self._safe_query("datamart", f"""
+        tr = self._q("datamart", f"""
             SELECT region_name FROM {DM} WHERE sale_date = :d
             GROUP BY region_name ORDER BY SUM(net_sales_amount) DESC LIMIT 1""",
             {"d": business_date})
-        tc_ = self._safe_query("datamart", f"""
+        tc_ = self._q("datamart", f"""
             SELECT source_channel FROM {DM} WHERE sale_date = :d
             GROUP BY source_channel ORDER BY SUM(net_sales_amount) DESC LIMIT 1""",
             {"d": business_date})
@@ -246,12 +260,11 @@ class AggregateValidator(BaseValidator):
                                ("product", "dm_sales_product_summary", net),
                                ("daily", "dm_sales_daily_summary", net),
                                ("executive", "dm_executive_sales_summary", self.e["net"])):
-            v = self._safe_query("datamart",
-                                 f"SELECT COALESCE(SUM({col}),0) AS t FROM {tbl} "
-                                 "WHERE sale_date = :d", {"d": business_date})
+            v = self._q("datamart",
+                        f"SELECT COALESCE(SUM({col}),0) AS t FROM {tbl} WHERE sale_date = :d",
+                        {"d": business_date})
             if v is None:
-                failed = True
-                totals[name] = "unavailable"
+                failed, totals[name] = True, "unavailable"
             else:
                 totals[name] = round(float(v.iloc[0]["t"] or 0), 2)
         if failed:

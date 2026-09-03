@@ -1,5 +1,5 @@
 # Source objects and load filters - verified against 02CreateTables.sql
-# Status column is 'transaction_status' in every source and staging table.
+# The status column is 'transaction_status' in every source and staging table.
 retail:
   file_path: ${RETAIL_CSV_PATH}
   source_db: source_retail
@@ -8,7 +8,7 @@ retail:
   status_column: transaction_status
   status_filter: [COMPLETED]
   excluded_status: [CANCELLED]
-  primary_key: transaction_id
+  primary_key: transaction_id            # same name in source and staging - no rename
   mandatory_fields: [transaction_id, sale_date, branch_code, customer_id, product_code, gross_amount]
   compare_columns: [sale_date, branch_code, customer_id, product_code, product_name_raw,
                     product_type_raw, gross_amount, discount_amount, payment_mode]
@@ -36,7 +36,7 @@ distributor:
   status_column: transaction_status
   status_filter: [APPROVED]
   excluded_status: [SUBMITTED, REJECTED, CANCELLED]
-  primary_key_source: distributor_txn_id
+  primary_key_source: distributor_txn_id   # renamed on load
   primary_key_target: transaction_id
   mandatory_fields: [transaction_id, sale_date, distributor_code, product_code, gross_amount]
   compare_columns: [sale_date, distributor_code, customer_id, product_code, product_name_raw,
@@ -54,6 +54,7 @@ online:
   compare_columns: [sale_date, customer_id, product_code, product_name_raw,
                     product_type_raw, gross_amount, discount_amount, region_code, payment_mode]
 
+# All master / reference tables live in fs_source_retail
 master:
   customer:
     source_db: source_retail

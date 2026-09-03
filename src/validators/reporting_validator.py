@@ -1,4 +1,4 @@
-"""Layer 3b validators - Data Mart to Reporting.
+"""Layer 3b - Data Mart to Reporting.
 
 All five views are SELECT * of their data mart summary table
 (04CreateReportingViews.sql), so view-vs-data-mart must reconcile exactly.
@@ -32,6 +32,8 @@ class ReportingValidator(BaseValidator):
         super().__init__(tolerance=rules["tolerance"]["amount"])
         self.db, self.rc, self.rules = db, report_conn, rules
         self.cfg = load_config("reporting_config")["reports"]
+        # Displayed figures are rounded for presentation, so allow a wider band.
+        self.display_tol = max(self.tolerance, 1.0)
 
     def validate_views(self, business_date):
         results = []
@@ -51,18 +53,17 @@ class ReportingValidator(BaseValidator):
                 vr = self.db.count("reporting", view, "sale_date = :d", {"d": business_date})
                 dr = self.db.count("datamart", dm_tbl, "sale_date = :d", {"d": business_date})
             except Exception as exc:
-                results.append(self._blocked(res, f"View or data mart unreadable: "
-                                                  f"{type(exc).__name__}"))
+                results.append(self._blocked(
+                    res, f"View or data mart unreadable: {type(exc).__name__}"))
                 continue
             if dr == 0 and vr == 0:
                 results.append(self._skipped(res, "No rows in either object for the date"))
                 continue
-            res.expected = round(float(d or 0), 2)
-            res.actual = round(float(v or 0), 2)
+            res.expected, res.actual = round(float(d or 0), 2), round(float(v or 0), 2)
             ok = (abs(float(d or 0) - float(v or 0)) <= self.tolerance) and (vr == dr)
             res.status = "PASS" if ok else "FAIL"
-            res.message = (f"data mart: {dr} rows / {res.expected} | "
-                           f"view: {vr} rows / {res.actual}")
+            res.message = (f"data mart: {dr} row(s) / {res.expected} | "
+                           f"view: {vr} row(s) / {res.actual}")
             res.compute_variance()
             log.info("[%s] %s - %s", tc, res.status, res.message)
             results.append(res)
@@ -81,22 +82,21 @@ class ReportingValidator(BaseValidator):
                     "reporting", f"SELECT COALESCE(SUM({measure}),0) FROM {view} "
                     "WHERE sale_date = :d", {"d": business_date}) or 0)
             except Exception as exc:
-                results.append(self._blocked(res, f"Reporting view unreadable: "
-                                                  f"{type(exc).__name__}"))
+                results.append(self._blocked(
+                    res, f"Reporting view unreadable: {type(exc).__name__}"))
                 continue
             try:
                 displayed = self.rc.page_total(key, params={"date": business_date})
             except Exception as exc:
-                results.append(self._blocked(res, f"Report page unreachable: "
-                                                  f"{type(exc).__name__}"))
+                results.append(self._blocked(
+                    res, f"Report page unreachable: {type(exc).__name__}"))
                 continue
             if displayed is None:
                 results.append(self._blocked(
                     res, "No numeric total could be extracted from the rendered page"))
                 continue
             res.expected, res.actual = round(expected, 2), displayed
-            ok = abs(expected - displayed) <= max(self.tolerance, 1.0)
-            res.status = "PASS" if ok else "FAIL"
+            res.status = "PASS" if abs(expected - displayed) <= self.display_tol else "FAIL"
             res.message = f"view={res.expected}, displayed={displayed}"
             res.compute_variance()
             log.info("[%s] %s - %s", tc, res.status, res.message)
@@ -132,8 +132,7 @@ class ReportingValidator(BaseValidator):
         if displayed is None:
             return self._blocked(res, f"No filtered total extracted for region {region}")
         res.expected, res.actual = round(expected, 2), displayed
-        ok = abs(expected - displayed) <= max(self.tolerance, 1.0)
-        res.status = "PASS" if ok else "FAIL"
+        res.status = "PASS" if abs(expected - displayed) <= self.display_tol else "FAIL"
         res.message = f"region={region}: expected={res.expected}, displayed={displayed}"
         res.compute_variance()
         log.info("[RPT-V08] %s - %s", res.status, res.message)
@@ -159,7 +158,7 @@ class ReportingValidator(BaseValidator):
 
     def validate_cross_report(self, business_date):
         res = self._res("RPT-V10", LAYER,
-                        "Executive net total equals channel, region and daily view totals",
+                        "Executive net total equals the channel, region and daily view totals",
                         source_object="vw_executive_dashboard",
                         target_object="vw_channel_performance / vw_region_performance / "
                                       "vw_daily_sales_trend",
@@ -177,8 +176,7 @@ class ReportingValidator(BaseValidator):
                 totals[name] = round(float(v or 0), 2)
             except Exception as exc:
                 return self._blocked(res, f"{view} unreadable: {type(exc).__name__}")
-        res.expected = totals.get("executive")
-        res.actual = totals
+        res.expected, res.actual = totals.get("executive"), totals
         res.status = "PASS" if len(set(totals.values())) <= 1 else "FAIL"
         res.message = f"view totals: {totals}"
         res.compute_variance()

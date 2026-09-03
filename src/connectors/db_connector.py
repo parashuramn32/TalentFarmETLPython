@@ -23,7 +23,8 @@ class DBConnector:
 
     def _engine(self, logical_name):
         if logical_name not in self._dbs:
-            raise KeyError(f"Unknown logical database '{logical_name}'. Valid: {list(self._dbs)}")
+            raise KeyError(f"Unknown logical database '{logical_name}'. "
+                           f"Valid: {list(self._dbs)}")
         if logical_name not in self._engines:
             uri = (f"mysql+pymysql://{self._my['user']}:{quote_plus(str(self._my['password']))}"
                    f"@{self._my['host']}:{self._my['port']}/{self._dbs[logical_name]}"

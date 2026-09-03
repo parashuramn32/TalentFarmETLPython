@@ -2,6 +2,7 @@
 tolerance:
   amount: 0.01
   percentage: 0.001
+  average: 0.5            # avg_ticket_size is stored rounded, so allow a wider band
 
 net_amount_formula: "gross_sales_amount - COALESCE(discount_amount,0)"
 
@@ -36,21 +37,21 @@ executive_columns:
   top_channel: top_channel
 
 product_harmonisation:
-  LI:                {type: INSURANCE,   category: Life Insurance}
-  "Life Ins":        {type: INSURANCE,   category: Life Insurance}
-  "Life Insurance":  {type: INSURANCE,   category: Life Insurance}
-  Insurance:         {type: INSURANCE,   category: Life Insurance}
-  ULIP:              {type: INSURANCE,   category: ULIP}
-  "Term Plan":       {type: INSURANCE,   category: Life Insurance}
-  "Health Insurance": {type: INSURANCE,  category: Health Insurance}
-  MF:                {type: MUTUAL_FUND, category: null}
-  "Mutual Fund":     {type: MUTUAL_FUND, category: null}
-  SIP:               {type: MUTUAL_FUND, category: SIP}
-  "Equity Fund":     {type: MUTUAL_FUND, category: Equity Fund}
-  "Debt Fund":       {type: MUTUAL_FUND, category: Debt Fund}
-  "Hybrid Fund":     {type: MUTUAL_FUND, category: Hybrid Fund}
+  LI:                 {type: INSURANCE,   category: Life Insurance}
+  "Life Ins":         {type: INSURANCE,   category: Life Insurance}
+  "Life Insurance":   {type: INSURANCE,   category: Life Insurance}
+  Insurance:          {type: INSURANCE,   category: Life Insurance}
+  ULIP:               {type: INSURANCE,   category: ULIP}
+  "Term Plan":        {type: INSURANCE,   category: Life Insurance}
+  "Health Insurance": {type: INSURANCE,   category: Health Insurance}
+  MF:                 {type: MUTUAL_FUND, category: null}
+  "Mutual Fund":      {type: MUTUAL_FUND, category: null}
+  SIP:                {type: MUTUAL_FUND, category: SIP}
+  "Equity Fund":      {type: MUTUAL_FUND, category: Equity Fund}
+  "Debt Fund":        {type: MUTUAL_FUND, category: Debt Fund}
+  "Hybrid Fund":      {type: MUTUAL_FUND, category: Hybrid Fund}
   "Large Cap Equity": {type: MUTUAL_FUND, category: Equity Fund}
-  "Gilt Fund":       {type: MUTUAL_FUND, category: Debt Fund}
+  "Gilt Fund":        {type: MUTUAL_FUND, category: Debt Fund}
 
 channel_by_source:
   retail: Retail
@@ -62,7 +63,10 @@ allowed_values:
   region_name: [NORTH, SOUTH, EAST, WEST, CENTRAL, UNKNOWN_REGION]
   source_channel: [Retail, Distributor, Online]
   kyc_status: [VERIFIED, PENDING, REJECTED, EXPIRED]
-  active_flag: [0, 1]
+  active_flag: [0, 1]              # TINYINT in this schema, not Y/N
+
+# Salutations stripped during customer name cleansing (case-insensitive)
+salutations: [Mr, Mrs, Ms, Dr, Prof]
 
 state_normalisation:
   MH: Maharashtra
@@ -70,8 +74,10 @@ state_normalisation:
   MAHARASHTRA: Maharashtra
   Mahrashtra: Maharashtra
   KA: Karnataka
+  Karnatka: Karnataka
   TN: "Tamil Nadu"
   DL: Delhi
+  WB: "West Bengal"
 
 patterns:
   mobile: "^[6-9][0-9]{9}$"
@@ -80,23 +86,18 @@ patterns:
 thresholds:
   unknown_region_pct: 5.0
 
-# ---------------------------------------------------------------------------
-# Submission 3 alignment
-# ---------------------------------------------------------------------------
-# Assignment 3 Section 8 defines a three-level severity scale (High/Medium/Low).
-# The internal test design uses Critical for executive-metric distortion and
-# compliance breaches; it maps to High in the reportable defect log.
+# Assignment 3 Section 8 uses a three-level scale. Internal design keeps
+# Critical for executive-metric distortion; it maps to High when reported.
 severity_map:
   Critical: High
   High: High
   Medium: Medium
   Low: Low
 
-# Business impact statements used when generating the defect log (Section 6).
 business_impact:
   R-SS-01: "Sales volume under-reported; downstream totals and incentive calculations understated."
   R-SS-02: "Duplicate transactions inflate reported sales and distort average ticket size."
-  R-SS-03: "Cancelled/rejected transactions inflate revenue and misstate executive metrics."
+  R-SS-03: "Cancelled or rejected transactions inflate revenue and misstate executive metrics."
   R-SS-04: "Transaction identity lost between layers; end-to-end traceability broken."
   R-SS-05: "Transactions cannot be attributed to a customer, breaking enrichment and compliance checks."
   R-SS-06: "Later API pages dropped; a full day of online sales may be silently missing."
@@ -110,16 +111,16 @@ business_impact:
   R-SS-15: "Unauthenticated access possible to customer transaction data."
   R-SS-16: "Response structure deviates from contract; extraction may silently drop fields."
   R-SS-17: "Out-of-period records included, overstating the reporting window."
-  R-DQ-01: "Reference data incomplete; enrichment and harmonisation will fail for missing keys."
+  R-DQ-01: "Reference data incomplete; enrichment and harmonisation fail for missing keys."
   R-DQ-02: "Invalid contact data prevents customer communication and fails data quality standards."
   R-DQ-03: "State values do not resolve, pushing revenue into UNKNOWN_REGION and distorting regional performance."
-  R-DQ-04: "Transactions reference unknown products/regions/branches; revenue cannot be correctly categorised."
+  R-DQ-04: "Transactions reference unknown products, regions or branches; revenue cannot be correctly categorised."
   R-DQ-05: "Transactions reference unknown customers; enrichment and KYC compliance cannot be evaluated."
   R-DQ-06: "Revenue recognised from customers who failed KYC - a regulatory compliance breach."
   R-DQ-07: "Implausible customer demographics undermine segmentation and reporting confidence."
-  R-DQ-08: "Product type outside the allowed domain breaks insurance vs mutual fund split."
+  R-DQ-08: "Product type outside the allowed domain breaks the insurance versus mutual fund split."
   R-DQ-09: "Region outside the allowed domain breaks regional roll-ups."
-  R-DQ-10: "Policy/folio identifiers missing; transactions cannot be reconciled with the issuing system."
+  R-DQ-10: "Policy or folio identifiers missing; transactions cannot be reconciled with the issuing system."
   R-DM-01: "Product mix misstated - insurance premium and mutual fund sales are both wrong."
   R-DM-02: "ULIP revenue reported as mutual fund, understating insurance premium in executive reporting."
   R-DM-03: "Non-standard product naming fragments product-level reporting."
@@ -137,7 +138,7 @@ business_impact:
   R-AG-02: "Grouping error misallocates revenue across products or dates."
   R-AG-03: "Average ticket size incorrect, misleading sales-quality analysis."
   R-AG-04: "Executive dashboard metrics incorrect - leadership decisions based on wrong numbers."
-  R-AG-05: "Top performing region/channel misidentified, misdirecting sales focus."
+  R-AG-05: "Top performing region or channel misidentified, misdirecting sales focus."
   R-AG-06: "Summary models disagree; the same metric differs by report."
   R-RP-01: "Dashboard displays a figure that does not match the data mart; users lose trust in reporting."
   R-RP-02: "Filtered views return incorrect results, misinforming regional and product analysis."

@@ -1,4 +1,4 @@
-"""Online Sales REST API connector with pagination, retry and rate-limit handling."""
+"""Online Sales REST API connector: pagination, retry and rate-limit handling."""
 import time
 import requests
 import pandas as pd
@@ -43,9 +43,14 @@ class APIConnector:
         return self._get(self.cfg["endpoint"], params=params)
 
     def fetch_all_pages(self, from_date, to_date, status=None):
-        """Walk every page; return (DataFrame, total_records_reported)."""
+        """Walk every page; return (DataFrame, total_records_reported).
+
+        A max_pages safety stop prevents an infinite loop if the API keeps
+        returning data without ever satisfying the stop condition.
+        """
         records, page, total_reported = [], 1, None
-        while True:
+        max_pages = self.cfg.get("max_pages", 200)
+        while page <= max_pages:
             resp = self.get_page(from_date, to_date, page=page, status=status)
             if resp.status_code == 404:
                 log.info("No data for range %s..%s", from_date, to_date)
@@ -61,4 +66,6 @@ class APIConnector:
             if not chunk or (total_reported is not None and len(records) >= total_reported):
                 break
             page += 1
+        else:
+            log.warning("Pagination stopped at the max_pages guard (%s pages)", max_pages)
         return pd.DataFrame(records), total_reported

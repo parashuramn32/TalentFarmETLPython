@@ -27,9 +27,10 @@ class ReportConnector:
         return resp.text
 
     def tables(self, report_key, params=None):
+        from io import StringIO
         html = self.fetch(report_key, params)
         try:
-            return pd.read_html(html)
+            return pd.read_html(StringIO(html))     # StringIO avoids a pandas FutureWarning
         except ValueError:
             log.warning("No HTML tables found on report %s", report_key)
             return []
@@ -44,7 +45,8 @@ class ReportConnector:
             found[label] = float(m.group(1).replace(",", "")) if m else None
         return found
 
-    def page_total(self, report_key, measure_hints=("net", "sales", "total", "amount"), params=None):
+    def page_total(self, report_key, measure_hints=("net", "sales", "total", "amount"),
+                   params=None):
         """Sum the primary numeric measure column shown on a report page."""
         for t in self.tables(report_key, params):
             for col in t.columns:

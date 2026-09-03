@@ -1,4 +1,4 @@
-"""Layer 2 validators - Staging to Data Mart (transformation correctness).
+"""Layer 2 - Staging to Data Mart (transformation correctness).
 
 dm_sales_transaction (02CreateTables.sql):
   sales_transaction_id PK, source_channel, sale_date, customer_id, customer_name_clean,
@@ -6,7 +6,7 @@ dm_sales_transaction (02CreateTables.sql):
   product_category, policy_number, folio_number, gross_sales_amount, discount_amount,
   net_sales_amount, commission_amount, transaction_status, load_batch_id, created_at
 
-No reversal_amount, zone_name, customer_mobile or product_type_raw column exists here.
+There is no reversal_amount, zone_name, customer_mobile or product_type_raw column here.
 """
 import pandas as pd
 
@@ -26,8 +26,10 @@ class StagingToDataMartValidator(BaseValidator):
         super().__init__(tolerance=rules["tolerance"]["amount"])
         self.db, self.rules = db, rules
         self.cfg = load_config("source_config")
+        self._salutation_re = (r"^(?:" + "|".join(rules.get("salutations",
+                              ["Mr", "Mrs", "Ms", "Dr", "Prof"])) + r")\.?\s+")
 
-    def _safe_query(self, alias, sql, params=None):
+    def _q(self, alias, sql, params=None):
         try:
             return self.db.query(alias, sql, params)
         except Exception as exc:
@@ -35,17 +37,16 @@ class StagingToDataMartValidator(BaseValidator):
             return None
 
     def _dm(self, business_date, cols="*"):
-        return self._safe_query("datamart",
-                                f"SELECT {cols} FROM {DM} WHERE sale_date = :d",
-                                {"d": business_date})
+        return self._q("datamart", f"SELECT {cols} FROM {DM} WHERE sale_date = :d",
+                       {"d": business_date})
 
     def _staging_raw_types(self, business_date):
+        """product_code -> product_type_raw, since the DM does not retain the raw label."""
         frames = []
         for t in ("stg_retail_sales", "stg_distributor_sales", "stg_online_sales"):
-            df = self._safe_query(
-                "staging",
-                f"SELECT DISTINCT product_code, product_type_raw FROM {t} WHERE sale_date = :d",
-                {"d": business_date})
+            df = self._q("staging",
+                         f"SELECT DISTINCT product_code, product_type_raw FROM {t} "
+                         "WHERE sale_date = :d", {"d": business_date})
             if df is not None:
                 frames.append(df)
         if not frames:
@@ -53,19 +54,31 @@ class StagingToDataMartValidator(BaseValidator):
         out = pd.concat(frames, ignore_index=True)
         return out.drop_duplicates(subset=["product_code"]) if not out.empty else out
 
+    def expected_clean_name(self, series):
+        """Trim first, then strip a leading salutation case-insensitively.
+
+        Order matters: applying the anchored pattern before trimming means a
+        leading space prevents it from matching at all.
+        """
+        return (series.astype(str)
+                .str.strip()
+                .str.replace(self._salutation_re, "", regex=True, case=False)
+                .str.replace(r"\s+", " ", regex=True)
+                .str.strip()
+                .str.title())
+
     # ---------- DM-V01..V04, DM-V13 ----------
     def validate_product_harmonisation(self, business_date):
         results = []
         dm = self._dm(business_date,
                       "sales_transaction_id, product_code, standard_product_name, "
                       "standard_product_type, product_category")
-        pm = self._safe_query("source_retail",
-                              "SELECT product_code, standard_product_name, "
-                              "standard_product_type, product_category, active_flag "
-                              "FROM product_master_raw")
+        pm = self._q("source_retail",
+                     "SELECT product_code, standard_product_name, standard_product_type, "
+                     "product_category, active_flag FROM product_master_raw")
 
         res = self._res("DM-V01", LAYER,
-                        "standard_product_type in data mart matches product master",
+                        "standard_product_type in the data mart matches the product master",
                         source_object="product_master_raw", target_object=DM,
                         expected=0, severity="Critical", risk_ref="R-DM-01")
         if dm is None or pm is None:
@@ -78,7 +91,7 @@ class StagingToDataMartValidator(BaseValidator):
                     != m["standard_product_type_pm"].astype(str).str.upper()]
             res.actual = len(bad)
             res.status = "PASS" if bad.empty else "FAIL"
-            res.message = f"{len(bad)} transaction(s) with an incorrect standard_product_type"
+            res.message = f"{len(bad)} of {len(m)} transaction(s) with a wrong standard_product_type"
             res.failed_sample = bad[["sales_transaction_id", "product_code",
                                      "standard_product_type_dm",
                                      "standard_product_type_pm"]].head(10).to_dict("records")
@@ -86,11 +99,12 @@ class StagingToDataMartValidator(BaseValidator):
             log.info("[DM-V01] %s - %s", res.status, res.message)
             results.append(res)
 
+        raw = self._staging_raw_types(business_date)
+
         res2 = self._res("DM-V02", LAYER,
-                         "ULIP products must map to INSURANCE (not MUTUAL_FUND)",
+                         "ULIP products must map to INSURANCE, not MUTUAL_FUND",
                          source_object="stg_* product_type_raw", target_object=DM,
                          expected=0, severity="Critical", risk_ref="R-DM-02")
-        raw = self._staging_raw_types(business_date)
         if dm is None or raw is None:
             results.append(self._blocked(res2, "Data mart or staging raw types could not be read"))
         elif dm.empty or raw.empty:
@@ -98,15 +112,18 @@ class StagingToDataMartValidator(BaseValidator):
         else:
             m = dm.merge(raw, on="product_code", how="inner")
             ulip = m[m["product_type_raw"].astype(str).str.upper() == "ULIP"]
-            bad = ulip[ulip["standard_product_type"].astype(str).str.upper() != "INSURANCE"]
-            res2.actual = len(bad)
-            res2.status = "PASS" if bad.empty else "FAIL"
-            res2.message = (f"{len(bad)} of {len(ulip)} ULIP transaction(s) "
-                            f"not classified as INSURANCE")
-            res2.failed_sample = bad["sales_transaction_id"].head(10).tolist()
-            res2.compute_variance()
-            log.info("[DM-V02] %s - %s", res2.status, res2.message)
-            results.append(res2)
+            if ulip.empty:
+                results.append(self._skipped(res2, "No ULIP transactions on this business date"))
+            else:
+                bad = ulip[ulip["standard_product_type"].astype(str).str.upper() != "INSURANCE"]
+                res2.actual = len(bad)
+                res2.status = "PASS" if bad.empty else "FAIL"
+                res2.message = (f"{len(bad)} of {len(ulip)} ULIP transaction(s) "
+                                f"not classified as INSURANCE")
+                res2.failed_sample = bad["sales_transaction_id"].head(10).tolist()
+                res2.compute_variance()
+                log.info("[DM-V02] %s - %s", res2.status, res2.message)
+                results.append(res2)
 
         res3 = self._res("DM-V03", LAYER,
                          "Every raw product label maps per the harmonisation reference matrix",
@@ -209,22 +226,20 @@ class StagingToDataMartValidator(BaseValidator):
     # ---------- DM-V06..V08, DM-V16 ----------
     def validate_region_mapping(self, business_date):
         results = []
-        rm = self._safe_query("source_retail",
-                              "SELECT branch_code, state, region_name FROM branch_region_mapping_raw")
+        rm = self._q("source_retail",
+                     "SELECT branch_code, state, region_name FROM branch_region_mapping_raw")
 
         res = self._res("DM-V06", LAYER,
-                        "Retail region derived from branch_code via branch/region mapping",
+                        "Retail region derived from branch_code via the branch/region mapping",
                         source_object="stg_retail_sales.branch_code + branch_region_mapping_raw",
                         target_object=f"{DM}.region_name",
                         expected=0, severity="Critical", risk_ref="R-DM-05")
-        stg = self._safe_query(
-            "staging",
-            "SELECT transaction_id, branch_code FROM stg_retail_sales WHERE sale_date = :d",
-            {"d": business_date})
-        dm = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, region_name FROM dm_sales_transaction "
-            "WHERE sale_date = :d AND source_channel = 'Retail'", {"d": business_date})
+        stg = self._q("staging",
+                      "SELECT transaction_id, branch_code FROM stg_retail_sales "
+                      "WHERE sale_date = :d", {"d": business_date})
+        dm = self._q("datamart",
+                     "SELECT sales_transaction_id, region_name FROM dm_sales_transaction "
+                     "WHERE sale_date = :d AND source_channel = 'Retail'", {"d": business_date})
         if stg is None or dm is None or rm is None:
             results.append(self._blocked(res, "Staging, data mart or mapping could not be read"))
         elif stg.empty or dm.empty:
@@ -237,7 +252,8 @@ class StagingToDataMartValidator(BaseValidator):
                          how="left", suffixes=("_dm", "_map"))
             if m.empty:
                 results.append(self._blocked(
-                    res, "Could not join data mart to staging on the surrogate key pattern"))
+                    res, "Could not join the data mart to staging on the surrogate key pattern "
+                         "(expected sales_transaction_id to end with the source transaction_id)"))
             else:
                 bad = m[(m["region_name_map"].notna()) &
                         (m["region_name_dm"].astype(str).str.upper()
@@ -245,8 +261,8 @@ class StagingToDataMartValidator(BaseValidator):
                 unmapped = m[m["region_name_map"].isna()]
                 res.actual = len(bad)
                 res.status = "PASS" if bad.empty else "FAIL"
-                res.message = (f"{len(bad)} incorrect region(s); "
-                               f"{len(unmapped)} branch_code not present in mapping")
+                res.message = (f"{len(bad)} incorrect region(s) of {len(m)} joined; "
+                               f"{len(unmapped)} branch_code not present in the mapping")
                 res.failed_sample = bad[["sales_transaction_id", "branch_code",
                                          "region_name_dm",
                                          "region_name_map"]].head(10).to_dict("records")
@@ -258,10 +274,10 @@ class StagingToDataMartValidator(BaseValidator):
                          source_object="stg_distributor_sales.region_code",
                          target_object=f"{DM}.region_name",
                          expected=0, severity="High", risk_ref="R-DM-05")
-        dm_d = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, region_name FROM dm_sales_transaction "
-            "WHERE sale_date = :d AND source_channel = 'Distributor'", {"d": business_date})
+        dm_d = self._q("datamart",
+                       "SELECT sales_transaction_id, region_name FROM dm_sales_transaction "
+                       "WHERE sale_date = :d AND source_channel = 'Distributor'",
+                       {"d": business_date})
         if dm_d is None:
             results.append(self._blocked(res2, "Data mart could not be read"))
         elif dm_d.empty:
@@ -272,21 +288,22 @@ class StagingToDataMartValidator(BaseValidator):
             unknown = dm_d[dm_d["region_name"].astype(str).str.upper() == "UNKNOWN_REGION"]
             res2.actual = len(bad)
             res2.status = "PASS" if bad.empty else "FAIL"
-            res2.message = f"{len(bad)} invalid region value(s); {len(unknown)} UNKNOWN_REGION"
+            res2.message = (f"{len(bad)} invalid region value(s); "
+                            f"{len(unknown)} fell back to UNKNOWN_REGION")
             res2.failed_sample = bad.head(10).to_dict("records")
             res2.compute_variance()
             log.info("[DM-V07] %s - %s", res2.status, res2.message)
             results.append(res2)
 
         res3 = self._res("DM-V08", LAYER,
-                         "Online region derived from normalised customer_state",
+                         "Online region derived from the normalised customer_state",
                          source_object="customer_master_raw.state + branch_region_mapping_raw",
                          target_object=f"{DM}.region_name",
                          expected=0, severity="High", risk_ref="R-DM-06")
-        dm_o = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, customer_state, region_name FROM dm_sales_transaction "
-            "WHERE sale_date = :d AND source_channel = 'Online'", {"d": business_date})
+        dm_o = self._q("datamart",
+                       "SELECT sales_transaction_id, customer_state, region_name "
+                       "FROM dm_sales_transaction WHERE sale_date = :d "
+                       "AND source_channel = 'Online'", {"d": business_date})
         if dm_o is None or rm is None:
             results.append(self._blocked(res3, "Data mart or mapping could not be read"))
         elif dm_o.empty:
@@ -306,23 +323,23 @@ class StagingToDataMartValidator(BaseValidator):
             bad = dm_o[dm_o["region_name"].astype(str).str.upper() != dm_o["_exp"]]
             res3.actual = len(bad)
             res3.status = "PASS" if bad.empty else "FAIL"
-            res3.message = f"{len(bad)} of {len(dm_o)} online transaction(s) with incorrect region"
+            res3.message = (f"{len(bad)} of {len(dm_o)} online transaction(s) "
+                            f"with an incorrect region")
             res3.failed_sample = bad[["sales_transaction_id", "customer_state",
                                       "region_name", "_exp"]].head(10).to_dict("records")
             res3.compute_variance()
             log.info("[DM-V08] %s - %s", res3.status, res3.message)
             results.append(res3)
 
+        threshold = self.rules["thresholds"]["unknown_region_pct"]
         res4 = self._res("DM-V16", LAYER,
-                         "UNKNOWN_REGION volume and value within the agreed threshold",
-                         target_object=f"{DM}.region_name",
-                         expected=self.rules["thresholds"]["unknown_region_pct"],
+                         "UNKNOWN_REGION volume within the agreed threshold",
+                         target_object=f"{DM}.region_name", expected=threshold,
                          severity="Medium", risk_ref="R-DM-14")
-        unk = self._safe_query(
-            "datamart",
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(net_sales_amount),0) AS val "
-            "FROM dm_sales_transaction WHERE sale_date = :d AND region_name = 'UNKNOWN_REGION'",
-            {"d": business_date})
+        unk = self._q("datamart",
+                      "SELECT COUNT(*) AS cnt, COALESCE(SUM(net_sales_amount),0) AS val "
+                      "FROM dm_sales_transaction WHERE sale_date = :d "
+                      "AND region_name = 'UNKNOWN_REGION'", {"d": business_date})
         try:
             tot = self.db.count("datamart", DM, "sale_date = :d", {"d": business_date})
         except Exception:
@@ -335,9 +352,9 @@ class StagingToDataMartValidator(BaseValidator):
             cnt, val = int(unk.iloc[0]["cnt"]), float(unk.iloc[0]["val"])
             pct = round(100 * cnt / tot, 2)
             res4.actual = pct
-            res4.status = "PASS" if pct < self.rules["thresholds"]["unknown_region_pct"] else "FAIL"
-            res4.message = (f"{cnt} UNKNOWN_REGION transaction(s) = {pct}% of volume, "
-                            f"value {val}")
+            res4.status = "PASS" if pct < threshold else "FAIL"
+            res4.message = (f"{cnt} of {tot} transaction(s) UNKNOWN_REGION = {pct}% "
+                            f"(threshold {threshold}%), value {val}")
             res4.compute_variance()
             log.info("[DM-V16] %s - %s", res4.status, res4.message)
             results.append(res4)
@@ -346,27 +363,24 @@ class StagingToDataMartValidator(BaseValidator):
     # ---------- DM-V10 ----------
     def validate_customer_cleansing(self, business_date):
         res = self._res("DM-V10", LAYER,
-                        "customer_name_clean is trimmed and title-cased from master",
+                        "customer_name_clean is trimmed, salutation-stripped and title-cased",
                         source_object="customer_master_raw.customer_name",
                         target_object=f"{DM}.customer_name_clean",
                         expected=0, severity="Medium", risk_ref="R-DM-08")
-        dm = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, customer_id, customer_name_clean "
-            "FROM dm_sales_transaction WHERE sale_date = :d AND customer_id IS NOT NULL",
-            {"d": business_date})
-        cm = self._safe_query("source_retail",
-                              "SELECT customer_id, customer_name FROM customer_master_raw")
+        dm = self._q("datamart",
+                     "SELECT sales_transaction_id, customer_id, customer_name_clean "
+                     "FROM dm_sales_transaction WHERE sale_date = :d "
+                     "AND customer_id IS NOT NULL", {"d": business_date})
+        cm = self._q("source_retail",
+                     "SELECT customer_id, customer_name FROM customer_master_raw")
         if dm is None or cm is None:
             return self._blocked(res, "Data mart or customer master could not be read")
         if dm.empty or cm.empty:
             return self._skipped(res, "No rows to evaluate")
         m = dm.merge(cm, on="customer_id", how="inner")
         if m.empty:
-            return self._skipped(res, "No customers joined to master")
-        expected = (m["customer_name"].astype(str)
-                    .str.replace(r"^(Mr\.?|Mrs\.?|Ms\.?|Dr\.?)\s*", "", regex=True)
-                    .str.strip().str.replace(r"\s+", " ", regex=True).str.title())
+            return self._skipped(res, "No customers joined to the master")
+        expected = self.expected_clean_name(m["customer_name"])
         bad = m[m["customer_name_clean"].astype(str).str.strip() != expected]
         res.actual = len(bad)
         res.status = "PASS" if bad.empty else "FAIL"
@@ -379,16 +393,15 @@ class StagingToDataMartValidator(BaseValidator):
 
     # ---------- DM-V11 ----------
     def validate_customer_state(self, business_date):
-        res = self._res("DM-V11", LAYER, "customer_state enriched from customer master",
+        res = self._res("DM-V11", LAYER, "customer_state enriched from the customer master",
                         source_object="customer_master_raw.state",
                         target_object=f"{DM}.customer_state",
                         expected=0, severity="Medium", risk_ref="R-DM-09")
-        dm = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, customer_id, customer_state FROM dm_sales_transaction "
-            "WHERE sale_date = :d AND customer_id IS NOT NULL", {"d": business_date})
-        cm = self._safe_query("source_retail",
-                              "SELECT customer_id, state FROM customer_master_raw")
+        dm = self._q("datamart",
+                     "SELECT sales_transaction_id, customer_id, customer_state "
+                     "FROM dm_sales_transaction WHERE sale_date = :d "
+                     "AND customer_id IS NOT NULL", {"d": business_date})
+        cm = self._q("source_retail", "SELECT customer_id, state FROM customer_master_raw")
         if dm is None or cm is None:
             return self._blocked(res, "Data mart or customer master could not be read")
         if dm.empty or cm.empty:
@@ -405,15 +418,14 @@ class StagingToDataMartValidator(BaseValidator):
     # ---------- DM-V12 ----------
     def validate_net_amount(self, business_date):
         res = self._res("DM-V12", LAYER,
-                        "net_sales_amount = gross_sales_amount - discount_amount",
+                        "net_sales_amount equals gross_sales_amount minus discount_amount",
                         source_object="stg_* gross/discount",
                         target_object=f"{DM}.net_sales_amount",
                         expected=0, severity="Critical", risk_ref="R-DM-10")
-        dm = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, gross_sales_amount, "
-            "COALESCE(discount_amount,0) AS discount_amount, net_sales_amount "
-            "FROM dm_sales_transaction WHERE sale_date = :d", {"d": business_date})
+        dm = self._q("datamart",
+                     "SELECT sales_transaction_id, gross_sales_amount, "
+                     "COALESCE(discount_amount,0) AS discount_amount, net_sales_amount "
+                     "FROM dm_sales_transaction WHERE sale_date = :d", {"d": business_date})
         if dm is None:
             return self._blocked(res, "Data mart could not be read")
         if dm.empty:
@@ -459,19 +471,18 @@ class StagingToDataMartValidator(BaseValidator):
                         "Null-customer transactions must not count as valid net sales",
                         source_object="stg_distributor_sales", target_object=DM,
                         expected=0, severity="High", risk_ref="R-DM-13")
-        bad = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id FROM dm_sales_transaction "
-            "WHERE sale_date = :d AND (customer_id IS NULL OR customer_id = '') "
-            "AND net_sales_amount > 0", {"d": business_date})
+        bad = self._q("datamart",
+                      "SELECT sales_transaction_id FROM dm_sales_transaction "
+                      "WHERE sale_date = :d AND (customer_id IS NULL OR customer_id = '') "
+                      "AND net_sales_amount > 0", {"d": business_date})
         if bad is None:
             results.append(self._blocked(res, "Data mart could not be read"))
         else:
             res.actual = len(bad)
             res.status = "PASS" if bad.empty else "FAIL"
             res.message = f"{len(bad)} null-customer transaction(s) contributing to net sales"
-            res.failed_sample = bad["sales_transaction_id"].head(10).tolist() \
-                if not bad.empty else []
+            res.failed_sample = (bad["sales_transaction_id"].head(10).tolist()
+                                 if not bad.empty else [])
             res.compute_variance()
             log.info("[DM-V15] %s - %s", res.status, res.message)
             results.append(res)
@@ -488,27 +499,27 @@ class StagingToDataMartValidator(BaseValidator):
                         "REJECTED-KYC customers must not contribute to net sales",
                         source_object="customer_master_raw.kyc_status", target_object=DM,
                         expected=0, severity="Critical", risk_ref="R-DQ-06")
-        dm = self._safe_query(
-            "datamart",
-            "SELECT sales_transaction_id, customer_id, net_sales_amount FROM dm_sales_transaction "
-            "WHERE sale_date = :d AND customer_id IS NOT NULL", {"d": business_date})
-        cm = self._safe_query("source_retail",
-                              "SELECT customer_id FROM customer_master_raw "
-                              "WHERE UPPER(kyc_status) = 'REJECTED'")
+        dm = self._q("datamart",
+                     "SELECT sales_transaction_id, customer_id, net_sales_amount "
+                     "FROM dm_sales_transaction WHERE sale_date = :d "
+                     "AND customer_id IS NOT NULL", {"d": business_date})
+        cm = self._q("source_retail",
+                     "SELECT customer_id FROM customer_master_raw "
+                     "WHERE UPPER(kyc_status) = 'REJECTED'")
         if dm is None or cm is None:
             return self._blocked(res, "Data mart or customer master could not be read")
         if dm.empty:
             return self._skipped(res, "No data mart rows for the business date")
         bad = dm[dm["customer_id"].isin(cm["customer_id"])] if not cm.empty else pd.DataFrame()
-        value = float(pd.to_numeric(bad["net_sales_amount"], errors="coerce").sum()) \
-            if not bad.empty else 0.0
+        value = (float(pd.to_numeric(bad["net_sales_amount"], errors="coerce").sum())
+                 if not bad.empty else 0.0)
         res.actual = len(bad)
         res.status = "PASS" if bad.empty else "FAIL"
         res.message = (f"{len(bad)} REJECTED-KYC transaction(s) contributing "
                        f"{value} to net sales")
-        res.failed_sample = bad[["sales_transaction_id",
-                                 "customer_id"]].head(10).to_dict("records") \
-            if not bad.empty else []
+        res.failed_sample = (bad[["sales_transaction_id",
+                                  "customer_id"]].head(10).to_dict("records")
+                             if not bad.empty else [])
         res.compute_variance()
         log.info("[MST-V04] %s - %s", res.status, res.message)
         return res

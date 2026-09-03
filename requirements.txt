@@ -1,25 +1,24 @@
 # Core data handling
-pandas==2.2.2
-numpy==1.26.4
+pandas>=2.2.0
+numpy>=1.26.0
 
 # MySQL connectivity (read-only)
-SQLAlchemy==2.0.30
-PyMySQL==1.1.1
-cryptography==42.0.8
+SQLAlchemy>=2.0.30
+PyMySQL>=1.1.1
+cryptography>=42.0.0
 
 # API and reporting page access
-requests==2.32.3
-beautifulsoup4==4.12.3
-lxml==5.2.2
-html5lib==1.1
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+lxml>=5.2.0
+html5lib>=1.1
 
 # Configuration
-PyYAML==6.0.1
-python-dotenv==1.0.1
+PyYAML>=6.0.1
+python-dotenv>=1.0.1
 
 # Reporting output
-openpyxl==3.1.4
-XlsxWriter==3.2.0
+openpyxl>=3.1.4
 
 # Testing
-pytest==8.2.2
+pytest>=8.2.0
