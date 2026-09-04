@@ -3,8 +3,10 @@
 Supports two response shapes:
   1. Envelope : {"total_records": N, "data": [...]}  - paginated
   2. Plain    : [ {...}, {...} ]                     - the whole result set
-The lab API returns shape 2, so pagination is treated as a single page and
-ONL-V03 verifies the collected count against the returned array length.
+
+The lab API (api_app/app.py) returns shape 2, ignores page/page_size and
+implements no authentication, so pagination is treated as a single page and
+the X-API-Key header is only sent when a real key is configured.
 """
 import time
 import requests
@@ -15,6 +17,9 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Values that mean "this API has no authentication"
+_NO_KEY = ("", "none", "not-required", "not_required", "n/a")
+
 
 class APIConnector:
     def __init__(self):
@@ -23,11 +28,9 @@ class APIConnector:
         self.session = requests.Session()
         headers = {"Content-Type": "application/json"}
         key = self.cfg.get("api_key")
-        # Only send the header when a real key is configured.
-        if key and str(key).lower() not in ("", "none", "not-required", "not_required"):
+        if key and str(key).strip().lower() not in _NO_KEY:
             headers["X-API-Key"] = key
         self.session.headers.update(headers)
-        self.auth_enforced = None      # discovered by _api_auth(); None = unknown
 
     def _get(self, path, params=None, api_key_override=None):
         url = f"{self.base}{path}"
@@ -35,7 +38,7 @@ class APIConnector:
         resp = None
         for attempt in range(1, self.cfg.get("max_retries", 3) + 1):
             resp = self.session.get(url, params=params, headers=headers,
-                                    timeout=self.cfg.get("timeout_seconds", 30))
+                                    timeout=self.cfg.get("timeout_seconds", 60))
             if resp.status_code == 429:
                 wait = self.cfg.get("backoff_seconds", 5) * attempt
                 log.warning("HTTP 429 rate limit. Backing off %ss (attempt %s)", wait, attempt)
@@ -57,14 +60,14 @@ class APIConnector:
     @staticmethod
     def _unpack(payload):
         """Return (records, total_records_or_None) for either response shape."""
-        if isinstance(payload, list):                 # plain array - no envelope
+        if isinstance(payload, list):                       # plain array
             return payload, None
         if isinstance(payload, dict):
             for key in ("data", "records", "results", "items"):
                 if isinstance(payload.get(key), list):
                     return payload[key], payload.get("total_records")
-            if isinstance(payload.get("data"), dict):  # nested envelope
-                inner = payload["data"]
+            inner = payload.get("data")
+            if isinstance(inner, dict):                     # nested envelope
                 for key in ("data", "records", "results", "items"):
                     if isinstance(inner.get(key), list):
                         return inner[key], inner.get("total_records")
@@ -96,7 +99,6 @@ class APIConnector:
                      total_reported if total_reported is not None else "unpaginated")
 
             if reported is None:
-                # Plain array: the endpoint returned the whole result set.
                 log.info("API returned an unpaginated array; treating as a single page")
                 total_reported = len(records)
                 break

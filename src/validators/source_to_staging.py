@@ -415,7 +415,7 @@ class SourceToStagingValidator(BaseValidator):
 
     def _api_health(self):
         res = self._res("ONL-V01", LAYER, "Online Sales API health endpoint responds 200",
-                        source_object="/api/health", expected=200,
+                        source_object="/health", expected=200,
                         severity="High", risk_ref="R-SS-14")
         try:
             r = self.api.health()
@@ -428,7 +428,7 @@ class SourceToStagingValidator(BaseValidator):
         log.info("[ONL-V01] %s - %s", res.status, res.message)
         return res
 
-        def _api_auth(self):
+    def _api_auth(self):
         res = self._res("ONL-V02", LAYER, "API rejects an invalid X-API-Key with HTTP 401",
                         source_object="/api/online-sales", expected=401,
                         severity="Medium", risk_ref="R-SS-15")
@@ -441,8 +441,9 @@ class SourceToStagingValidator(BaseValidator):
                 res.status = "PASS"
                 res.message = "invalid key correctly rejected with HTTP 401"
             elif r.status_code == 200:
-                # The endpoint served data despite an invalid key: authentication
-                # is not enforced. This is a genuine security finding, not an error.
+                # The endpoint served data despite an invalid key, so
+                # authentication is not enforced. This is a genuine security
+                # finding rather than a suite error.
                 res.status = "FAIL"
                 res.message = ("API returned HTTP 200 for an invalid X-API-Key - "
                                "authentication is not enforced on this endpoint")
@@ -455,19 +456,19 @@ class SourceToStagingValidator(BaseValidator):
         log.info("[ONL-V02] %s - %s", res.status, res.message)
         return res
 
-
     def _pagination(self, df, total_reported, api_failed):
         res = self._res("ONL-V03", LAYER,
-                        "All API pages retrieved - collected rows equal total_records",
+                        "All API records retrieved - collected rows equal the reported total",
                         source_object="/api/online-sales", expected=total_reported,
                         actual=None if df is None else len(df),
                         severity="Critical", risk_ref="R-SS-06")
         if api_failed:
             return self._blocked(res, "API extraction failed - pagination not verified")
         if total_reported is None:
-            return self._blocked(res, "total_records not present in the API envelope")
+            return self._blocked(res, "Could not determine an expected record count "
+                                      "from the API response")
         res.status = "PASS" if len(df) == total_reported else "FAIL"
-        res.message = f"collected={len(df)}, total_records={total_reported}"
+        res.message = f"collected={len(df)}, expected={total_reported}"
         res.compute_variance()
         log.info("[ONL-V03] %s - %s", res.status, res.message)
         return res
