@@ -1,10 +1,15 @@
+# Online Sales API (backend service on port 5001)
+#
+# The lab API returns a plain JSON array and does not implement pagination or
+# authentication. The connector handles both an envelope and a plain array, and
+# only sends the X-API-Key header when a real key is configured.
 online_sales_api:
-  base_url: ${API_BASE_URL}
+  base_url: ${API_BASE_URL}          # e.g. http://127.0.0.1:5001/api
   endpoint: /online-sales
   health_endpoint: /health
-  api_key: ${API_KEY}
+  api_key: ${API_KEY}                # set to 'not-required' when the API has no auth
   page_size: 500
-  timeout_seconds: 30
+  timeout_seconds: 60                # raised: the endpoint returns the full range in one call
   max_retries: 3
   backoff_seconds: 5
-  max_pages: 200          # safety stop so a broken API cannot loop forever
+  max_pages: 200                     # safety stop so a broken API cannot loop forever

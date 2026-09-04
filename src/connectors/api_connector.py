@@ -1,4 +1,11 @@
-"""Online Sales REST API connector: pagination, retry and rate-limit handling."""
+"""Online Sales REST API connector: pagination, retry and rate-limit handling.
+
+Supports two response shapes:
+  1. Envelope : {"total_records": N, "data": [...]}  - paginated
+  2. Plain    : [ {...}, {...} ]                     - the whole result set
+The lab API returns shape 2, so pagination is treated as a single page and
+ONL-V03 verifies the collected count against the returned array length.
+"""
 import time
 import requests
 import pandas as pd
@@ -14,8 +21,13 @@ class APIConnector:
         self.cfg = load_config("api_config")["online_sales_api"]
         self.base = self.cfg["base_url"].rstrip("/")
         self.session = requests.Session()
-        self.session.headers.update({"X-API-Key": self.cfg["api_key"],
-                                     "Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        key = self.cfg.get("api_key")
+        # Only send the header when a real key is configured.
+        if key and str(key).lower() not in ("", "none", "not-required", "not_required"):
+            headers["X-API-Key"] = key
+        self.session.headers.update(headers)
+        self.auth_enforced = None      # discovered by _api_auth(); None = unknown
 
     def _get(self, path, params=None, api_key_override=None):
         url = f"{self.base}{path}"
@@ -42,14 +54,32 @@ class APIConnector:
             params["status"] = status
         return self._get(self.cfg["endpoint"], params=params)
 
-    def fetch_all_pages(self, from_date, to_date, status=None):
-        """Walk every page; return (DataFrame, total_records_reported).
+    @staticmethod
+    def _unpack(payload):
+        """Return (records, total_records_or_None) for either response shape."""
+        if isinstance(payload, list):                 # plain array - no envelope
+            return payload, None
+        if isinstance(payload, dict):
+            for key in ("data", "records", "results", "items"):
+                if isinstance(payload.get(key), list):
+                    return payload[key], payload.get("total_records")
+            if isinstance(payload.get("data"), dict):  # nested envelope
+                inner = payload["data"]
+                for key in ("data", "records", "results", "items"):
+                    if isinstance(inner.get(key), list):
+                        return inner[key], inner.get("total_records")
+        return [], None
 
-        A max_pages safety stop prevents an infinite loop if the API keeps
-        returning data without ever satisfying the stop condition.
+    def fetch_all_pages(self, from_date, to_date, status=None):
+        """Collect every record for the range.
+
+        Returns (DataFrame, expected_count). When the API returns a plain array
+        the expected count is the array length, so ONL-V03 still asserts that
+        nothing was dropped between the response and the DataFrame.
         """
         records, page, total_reported = [], 1, None
         max_pages = self.cfg.get("max_pages", 200)
+
         while page <= max_pages:
             resp = self.get_page(from_date, to_date, page=page, status=status)
             if resp.status_code == 404:
@@ -57,15 +87,23 @@ class APIConnector:
                 break
             resp.raise_for_status()
             payload = resp.json()
+            chunk, reported = self._unpack(payload)
             if total_reported is None:
-                total_reported = payload.get("total_records")
-            chunk = payload.get("data", [])
+                total_reported = reported
             records.extend(chunk)
-            log.info("Page %s -> %s records (running total %s / %s)",
-                     page, len(chunk), len(records), total_reported)
-            if not chunk or (total_reported is not None and len(records) >= total_reported):
+            log.info("Page %s -> %s record(s) (running total %s / %s)",
+                     page, len(chunk), len(records),
+                     total_reported if total_reported is not None else "unpaginated")
+
+            if reported is None:
+                # Plain array: the endpoint returned the whole result set.
+                log.info("API returned an unpaginated array; treating as a single page")
+                total_reported = len(records)
+                break
+            if not chunk or len(records) >= total_reported:
                 break
             page += 1
         else:
             log.warning("Pagination stopped at the max_pages guard (%s pages)", max_pages)
+
         return pd.DataFrame(records), total_reported

@@ -428,7 +428,7 @@ class SourceToStagingValidator(BaseValidator):
         log.info("[ONL-V01] %s - %s", res.status, res.message)
         return res
 
-    def _api_auth(self):
+        def _api_auth(self):
         res = self._res("ONL-V02", LAYER, "API rejects an invalid X-API-Key with HTTP 401",
                         source_object="/api/online-sales", expected=401,
                         severity="Medium", risk_ref="R-SS-15")
@@ -437,13 +437,24 @@ class SourceToStagingValidator(BaseValidator):
                               params={"from_date": "2026-05-01", "to_date": "2026-05-01"},
                               api_key_override="invalid-key-test")
             res.actual = r.status_code
-            res.status = "PASS" if r.status_code == 401 else "FAIL"
-            res.message = f"invalid key returned HTTP {r.status_code} (expected 401)"
+            if r.status_code == 401:
+                res.status = "PASS"
+                res.message = "invalid key correctly rejected with HTTP 401"
+            elif r.status_code == 200:
+                # The endpoint served data despite an invalid key: authentication
+                # is not enforced. This is a genuine security finding, not an error.
+                res.status = "FAIL"
+                res.message = ("API returned HTTP 200 for an invalid X-API-Key - "
+                               "authentication is not enforced on this endpoint")
+            else:
+                res.status = "FAIL"
+                res.message = f"invalid key returned HTTP {r.status_code} (expected 401)"
             res.compute_variance()
         except Exception as exc:
             return self._blocked(res, f"API unreachable: {type(exc).__name__}")
         log.info("[ONL-V02] %s - %s", res.status, res.message)
         return res
+
 
     def _pagination(self, df, total_reported, api_failed):
         res = self._res("ONL-V03", LAYER,
