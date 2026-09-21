@@ -1,12 +1,23 @@
-# Source objects and load filters - verified against 02CreateTables.sql
-# The status column is 'transaction_status' in every source and staging table.
+# Source objects and load filters - verified against 02CreateTables.sql and
+# against the ACTUAL status values observed in the lab environment.
+#
+# IMPORTANT - status vocabulary discovered during Submission 3 execution:
+#   retail      : ACTIVE (valid)  /  CANCELLED (excluded)
+#   distributor : ACTIVE (valid)  /  REVERSED  (excluded)
+#   online      : ACTIVE (valid)  /  CANCELLED (excluded)
+# The earlier assumption of COMPLETED / APPROVED matched zero rows.
+#
+# Observed behaviour: CANCELLED and REVERSED transactions are present in BOTH
+# staging and the data mart, so the pipeline does not filter by status at
+# either layer. RET-V02 / DST-V02 / ONL-V06 therefore report a genuine finding
+# rather than a configuration error.
 retail:
   file_path: ${RETAIL_CSV_PATH}
   source_db: source_retail
   source_table: retail_sales_raw
   staging_table: stg_retail_sales
   status_column: transaction_status
-  status_filter: [COMPLETED]
+  status_filter: [ACTIVE]
   excluded_status: [CANCELLED]
   primary_key: transaction_id            # same name in source and staging - no rename
   mandatory_fields: [transaction_id, sale_date, branch_code, customer_id, product_code, gross_amount]
@@ -34,8 +45,8 @@ distributor:
   source_table: distributor_sales_raw
   staging_table: stg_distributor_sales
   status_column: transaction_status
-  status_filter: [APPROVED]
-  excluded_status: [SUBMITTED, REJECTED, CANCELLED]
+  status_filter: [ACTIVE]
+  excluded_status: [REVERSED]
   primary_key_source: distributor_txn_id   # renamed on load
   primary_key_target: transaction_id
   mandatory_fields: [transaction_id, sale_date, distributor_code, product_code, gross_amount]
@@ -47,8 +58,8 @@ online:
   source_table: online_sales_raw
   staging_table: stg_online_sales
   status_column: transaction_status
-  status_filter: [COMPLETED]
-  excluded_status: [PENDING, FAILED]
+  status_filter: [ACTIVE]
+  excluded_status: [CANCELLED]
   primary_key: transaction_id
   mandatory_fields: [transaction_id, sale_date, customer_id, product_code, gross_amount]
   compare_columns: [sale_date, customer_id, product_code, product_name_raw,
