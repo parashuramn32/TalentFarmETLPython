@@ -1,4 +1,5 @@
 # Business rules and COLUMN CONTRACTS - verified against 02CreateTables.sql
+# and against values observed in the lab environment during execution.
 tolerance:
   amount: 0.01
   percentage: 0.001
@@ -36,16 +37,32 @@ executive_columns:
   top_region: top_region
   top_channel: top_channel
 
+# ---------------------------------------------------------------------------
+# Product harmonisation matrix
+# ---------------------------------------------------------------------------
+# Each channel uses a different raw vocabulary. Observed in the lab:
+#   stg_retail_sales       -> MF, INS
+#   stg_distributor_sales  -> Mutual Fund, Insurance
+#   stg_online_sales       -> MUTUAL_FUND, INSURANCE
+# Matching is case-insensitive (keys are upper-cased before lookup), but the
+# distinct spellings must each be present.
 product_harmonisation:
+  # Retail - short codes
+  INS:                {type: INSURANCE,   category: null}
+  MF:                 {type: MUTUAL_FUND, category: null}
+  # Distributor - title case
+  Insurance:          {type: INSURANCE,   category: null}
+  "Mutual Fund":      {type: MUTUAL_FUND, category: null}
+  # Online - upper snake case
+  INSURANCE:          {type: INSURANCE,   category: null}
+  MUTUAL_FUND:        {type: MUTUAL_FUND, category: null}
+  # Additional labels retained for other cohorts / future data
   LI:                 {type: INSURANCE,   category: Life Insurance}
   "Life Ins":         {type: INSURANCE,   category: Life Insurance}
   "Life Insurance":   {type: INSURANCE,   category: Life Insurance}
-  Insurance:          {type: INSURANCE,   category: Life Insurance}
   ULIP:               {type: INSURANCE,   category: ULIP}
   "Term Plan":        {type: INSURANCE,   category: Life Insurance}
   "Health Insurance": {type: INSURANCE,   category: Health Insurance}
-  MF:                 {type: MUTUAL_FUND, category: null}
-  "Mutual Fund":      {type: MUTUAL_FUND, category: null}
   SIP:                {type: MUTUAL_FUND, category: SIP}
   "Equity Fund":      {type: MUTUAL_FUND, category: Equity Fund}
   "Debt Fund":        {type: MUTUAL_FUND, category: Debt Fund}
@@ -68,6 +85,9 @@ allowed_values:
 # Salutations stripped during customer name cleansing (case-insensitive)
 salutations: [Mr, Mrs, Ms, Dr, Prof]
 
+# States observed in the lab reference data: Maharashtra, Karnataka,
+# Tamil Nadu, Delhi, West Bengal, Gujarat. Abbreviations and common
+# misspellings map to the canonical spelling.
 state_normalisation:
   MH: Maharashtra
   "Mah.": Maharashtra
@@ -76,8 +96,10 @@ state_normalisation:
   KA: Karnataka
   Karnatka: Karnataka
   TN: "Tamil Nadu"
+  Tamilnadu: "Tamil Nadu"
   DL: Delhi
   WB: "West Bengal"
+  GJ: Gujarat
 
 patterns:
   mobile: "^[6-9][0-9]{9}$"
@@ -86,7 +108,7 @@ patterns:
 thresholds:
   unknown_region_pct: 5.0
 
-# Assignment 3 Section 8 uses a three-level scale. Internal design keeps
+# Assignment 3 Section 8 uses a three-level scale. The internal design keeps
 # Critical for executive-metric distortion; it maps to High when reported.
 severity_map:
   Critical: High
@@ -97,7 +119,7 @@ severity_map:
 business_impact:
   R-SS-01: "Sales volume under-reported; downstream totals and incentive calculations understated."
   R-SS-02: "Duplicate transactions inflate reported sales and distort average ticket size."
-  R-SS-03: "Cancelled or rejected transactions inflate revenue and misstate executive metrics."
+  R-SS-03: "Cancelled or reversed transactions inflate revenue and misstate executive metrics."
   R-SS-04: "Transaction identity lost between layers; end-to-end traceability broken."
   R-SS-05: "Transactions cannot be attributed to a customer, breaking enrichment and compliance checks."
   R-SS-06: "Later API pages dropped; a full day of online sales may be silently missing."
@@ -126,12 +148,12 @@ business_impact:
   R-DM-03: "Non-standard product naming fragments product-level reporting."
   R-DM-04: "Channel contribution misstated, distorting channel performance reviews."
   R-DM-05: "Revenue attributed to the wrong region, distorting regional targets and scorecards."
-  R-DM-06: "Online revenue not attributed to a region, understating regional performance."
+  R-DM-06: "Online revenue attributed to the wrong region, making regional performance reporting unreliable."
   R-DM-08: "Customer names inconsistent, causing duplicate customer views in reporting."
   R-DM-09: "Customer geography missing, preventing regional analysis of online sales."
   R-DM-10: "Net sales value incorrect - the headline revenue figure is wrong."
   R-DM-11: "Sales recorded against discontinued products, indicating a control gap."
-  R-DM-12: "Data mart volume does not reconcile with staging; revenue is over- or under-stated."
+  R-DM-12: "Data mart volume does not reconcile with valid staging volume; revenue is over- or under-stated."
   R-DM-13: "Unattributed transactions counted as valid revenue."
   R-DM-14: "Material revenue sits in UNKNOWN_REGION and is excluded from regional reporting."
   R-AG-01: "Summary totals disagree with transaction detail; dashboards show incorrect revenue."

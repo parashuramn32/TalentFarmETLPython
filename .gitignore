@@ -12,3 +12,9 @@ tests/mock/*.db
 
 check_*.py
 diagnose.py
+
+check_*.py
+diagnose.py
+
+check_*.py
+diag*.py

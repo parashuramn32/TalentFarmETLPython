@@ -7,6 +7,10 @@ dm_sales_transaction (02CreateTables.sql):
   net_sales_amount, commission_amount, transaction_status, load_batch_id, created_at
 
 There is no reversal_amount, zone_name, customer_mobile or product_type_raw column here.
+
+Surrogate key format observed in the lab: CHANNEL-SOURCEID, for example
+RET-RTL000020, DST-DST000099, ONL-ONL000003. DM-V06 splits on '-' to recover
+the source transaction_id when rejoining to staging.
 """
 import pandas as pd
 
@@ -18,6 +22,10 @@ log = get_logger(__name__)
 LAYER = "Staging-to-Data Mart"
 DQ = "Data Quality"
 DM = "dm_sales_transaction"
+
+# Separator between the channel prefix and the source transaction id in
+# sales_transaction_id (e.g. RET-RTL000020).
+SURROGATE_KEY_SEPARATOR = "-"
 
 
 class StagingToDataMartValidator(BaseValidator):
@@ -246,14 +254,18 @@ class StagingToDataMartValidator(BaseValidator):
             results.append(self._skipped(res, "No retail rows for the business date"))
         else:
             dm = dm.copy()
-            dm["_txn"] = dm["sales_transaction_id"].astype(str).str.split("_").str[-1]
+            # Surrogate key is CHANNEL-SOURCEID (e.g. RET-RTL000020), so split on
+            # '-' and take the trailing segment to recover the staging key.
+            dm["_txn"] = (dm["sales_transaction_id"].astype(str)
+                          .str.split(SURROGATE_KEY_SEPARATOR).str[-1])
             m = dm.merge(stg, left_on="_txn", right_on="transaction_id", how="inner") \
                   .merge(rm[["branch_code", "region_name"]], on="branch_code",
                          how="left", suffixes=("_dm", "_map"))
             if m.empty:
                 results.append(self._blocked(
                     res, "Could not join the data mart to staging on the surrogate key pattern "
-                         "(expected sales_transaction_id to end with the source transaction_id)"))
+                         f"(expected sales_transaction_id to end with the source "
+                         f"transaction_id after splitting on '{SURROGATE_KEY_SEPARATOR}')"))
             else:
                 bad = m[(m["region_name_map"].notna()) &
                         (m["region_name_dm"].astype(str).str.upper()
@@ -454,12 +466,17 @@ class StagingToDataMartValidator(BaseValidator):
                         severity="Critical", risk_ref="R-DM-12")
         try:
             stg_total = 0
-            for t, s in (("stg_retail_sales", "COMPLETED"),
-                         ("stg_distributor_sales", "APPROVED"),
-                         ("stg_online_sales", "COMPLETED")):
+            for channel in ("retail", "distributor", "online"):
+                cfg = self.cfg[channel]
+                tbl = cfg["staging_table"]
+                statuses = [s.upper() for s in cfg["status_filter"]]
+                placeholders = ", ".join(f":s{i}" for i in range(len(statuses)))
+                params = {"d": business_date}
+                params.update({f"s{i}": s for i, s in enumerate(statuses)})
                 stg_total += self.db.count(
-                    "staging", t, "sale_date = :d AND UPPER(transaction_status) = :s",
-                    {"d": business_date, "s": s})
+                    "staging", tbl,
+                    f"sale_date = :d AND UPPER({cfg['status_column']}) IN ({placeholders})",
+                    params)
             dm_total = self.db.count("datamart", DM, "sale_date = :d", {"d": business_date})
             results.append(self.validate_count(
                 "DM-V14", LAYER, "Valid staging total vs data mart transaction count",
