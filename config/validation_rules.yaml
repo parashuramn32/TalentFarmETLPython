@@ -7,6 +7,13 @@ tolerance:
 
 net_amount_formula: "gross_sales_amount - COALESCE(discount_amount,0)"
 
+# Statuses that represent a valid transaction in the data mart.
+# dm_sales_transaction contains CANCELLED and REVERSED rows (see DM-V14), so
+# the aggregate validators recompute from these statuses only, in order to
+# compare like with like against the summary tables. Without this filter every
+# aggregate check reports a breach that simply restates the DM-V14 defect.
+datamart_valid_statuses: [ACTIVE]
+
 datamart_columns:
   primary_key: sales_transaction_id
   channel: source_channel
@@ -86,8 +93,7 @@ allowed_values:
 salutations: [Mr, Mrs, Ms, Dr, Prof]
 
 # States observed in the lab reference data: Maharashtra, Karnataka,
-# Tamil Nadu, Delhi, West Bengal, Gujarat. Abbreviations and common
-# misspellings map to the canonical spelling.
+# Tamil Nadu, Delhi, West Bengal, Gujarat.
 state_normalisation:
   MH: Maharashtra
   "Mah.": Maharashtra

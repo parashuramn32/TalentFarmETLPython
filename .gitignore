@@ -18,3 +18,8 @@ diagnose.py
 
 check_*.py
 diag*.py
+
+check_*.py
+diag*.py
+inspect_*.py
+*.html

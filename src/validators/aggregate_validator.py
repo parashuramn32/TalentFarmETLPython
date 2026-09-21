@@ -11,6 +11,18 @@ Column contract (02CreateTables.sql):
   dm_executive_sales_summary(sale_date PK, total_transactions, total_insurance_premium,
                              total_mutual_fund_sales, total_net_sales_amount,
                              avg_ticket_size, top_region, top_channel)
+
+IMPORTANT - recompute baseline
+------------------------------
+dm_sales_transaction contains every transaction_status, including CANCELLED
+and REVERSED (see DM-V14). The summary tables are built from valid
+transactions only. Recomputing from the full data mart therefore compares
+different populations and reports a breach on every group.
+
+These validators recompute from ACTIVE transactions only, so an AGG failure
+means the aggregate build is genuinely wrong rather than simply reflecting
+the upstream status-filter defect. The valid statuses are read from
+validation_rules.yaml -> datamart_valid_statuses.
 """
 import pandas as pd
 
@@ -31,6 +43,15 @@ class AggregateValidator(BaseValidator):
         self.s = rules["summary_columns"]
         self.e = rules["executive_columns"]
         self.avg_tol = rules["tolerance"].get("average", 0.5)
+        statuses = rules.get("datamart_valid_statuses", ["ACTIVE"])
+        self.valid_statuses = [str(s).upper() for s in statuses]
+
+    # ---------------- helpers ----------------
+    def _status_clause(self, alias=""):
+        """SQL fragment restricting the data mart to valid transactions."""
+        col = f"{alias}transaction_status" if alias else "transaction_status"
+        quoted = ", ".join(f"'{s}'" for s in self.valid_statuses)
+        return f"UPPER({col}) IN ({quoted})"
 
     def _q(self, alias, sql, params=None):
         try:
@@ -69,7 +90,8 @@ class AggregateValidator(BaseValidator):
         res.actual = sum(v for v in breaches.values() if isinstance(v, int))
         res.failed_sample = list(breaches.items())[:10]
         res.status = "PASS" if not breaches else "FAIL"
-        res.message = f"{len(m)} group(s) compared; breaches: {breaches or 'none'}"
+        res.message = (f"{len(m)} group(s) compared on {'/'.join(self.valid_statuses)} "
+                       f"transactions; breaches: {breaches or 'none'}")
         res.compute_variance()
         log.info("[%s] %s - %s", tc, res.status, res.message)
         return res
@@ -99,13 +121,14 @@ class AggregateValidator(BaseValidator):
         log.info("[%s] %s - %s", tc, res.status, res.message)
         return res
 
+    # ---------------- region ----------------
     def validate_region_summary(self, business_date):
         net, gross, cnt, avg = self.s["net"], self.s["gross"], self.s["count"], self.s["avg"]
         exp = self._q("datamart", f"""
             SELECT sale_date, region_name, standard_product_type,
                    COUNT(*) AS {cnt}, SUM(gross_sales_amount) AS {gross},
                    SUM(net_sales_amount) AS {net}
-            FROM {DM} WHERE sale_date = :d
+            FROM {DM} WHERE sale_date = :d AND {self._status_clause()}
             GROUP BY sale_date, region_name, standard_product_type
         """, {"d": business_date})
         act = self._q("datamart", f"""
@@ -118,13 +141,14 @@ class AggregateValidator(BaseValidator):
                     [cnt, gross, net], "dm_sales_region_summary", "Critical", "R-AG-01"),
                 self._avg_check("AGG-V02", act, "dm_sales_region_summary")]
 
+    # ---------------- channel ----------------
     def validate_channel_summary(self, business_date):
         net, gross, cnt = self.s["net"], self.s["gross"], self.s["count"]
         exp = self._q("datamart", f"""
             SELECT sale_date, source_channel, standard_product_type,
                    COUNT(*) AS {cnt}, SUM(gross_sales_amount) AS {gross},
                    SUM(net_sales_amount) AS {net}
-            FROM {DM} WHERE sale_date = :d
+            FROM {DM} WHERE sale_date = :d AND {self._status_clause()}
             GROUP BY sale_date, source_channel, standard_product_type
         """, {"d": business_date})
         act = self._q("datamart", f"""
@@ -136,13 +160,14 @@ class AggregateValidator(BaseValidator):
             exp, act, ["sale_date", "source_channel", "standard_product_type"],
             [cnt, gross, net], "dm_sales_channel_summary", "Critical", "R-AG-01")
 
+    # ---------------- product ----------------
     def validate_product_summary(self, business_date):
         net, gross, cnt = self.s["net"], self.s["gross"], self.s["count"]
         exp = self._q("datamart", f"""
             SELECT sale_date, product_code, standard_product_type,
                    COUNT(*) AS {cnt}, SUM(gross_sales_amount) AS {gross},
                    SUM(net_sales_amount) AS {net}
-            FROM {DM} WHERE sale_date = :d
+            FROM {DM} WHERE sale_date = :d AND {self._status_clause()}
             GROUP BY sale_date, product_code, standard_product_type
         """, {"d": business_date})
         act = self._q("datamart", f"""
@@ -154,6 +179,7 @@ class AggregateValidator(BaseValidator):
             exp, act, ["sale_date", "product_code", "standard_product_type"],
             [cnt, gross, net], "dm_sales_product_summary", "High", "R-AG-02")
 
+    # ---------------- daily ----------------
     def validate_daily_summary(self, business_date):
         net, gross, cnt = self.s["net"], self.s["gross"], self.s["count"]
         exp = self._q("datamart", f"""
@@ -163,7 +189,8 @@ class AggregateValidator(BaseValidator):
                         THEN net_sales_amount ELSE 0 END) AS total_insurance_premium,
                    SUM(CASE WHEN standard_product_type='MUTUAL_FUND'
                         THEN net_sales_amount ELSE 0 END) AS total_mutual_fund_sales
-            FROM {DM} WHERE sale_date = :d GROUP BY sale_date
+            FROM {DM} WHERE sale_date = :d AND {self._status_clause()}
+            GROUP BY sale_date
         """, {"d": business_date})
         act = self._q("datamart", f"""
             SELECT sale_date, {cnt}, {gross}, {net},
@@ -177,6 +204,7 @@ class AggregateValidator(BaseValidator):
                     "dm_sales_daily_summary", "High", "R-AG-02"),
                 self._avg_check("AGG-V09", act, "dm_sales_daily_summary")]
 
+    # ---------------- executive ----------------
     def validate_executive_summary(self, business_date):
         """Each executive metric gets its own validation ID (AGG-V06a..e) so that
         every reported row is individually traceable (Assignment 3, Section 5)."""
@@ -189,7 +217,7 @@ class AggregateValidator(BaseValidator):
                    COALESCE(SUM(CASE WHEN standard_product_type='MUTUAL_FUND'
                         THEN net_sales_amount ELSE 0 END),0) AS {e['mutual_fund']},
                    COALESCE(SUM(net_sales_amount),0) AS {e['net']}
-            FROM {DM} WHERE sale_date = :d
+            FROM {DM} WHERE sale_date = :d AND {self._status_clause()}
         """, {"d": business_date})
         act = self._q("datamart", f"""
             SELECT {e['count']}, {e['insurance']}, {e['mutual_fund']}, {e['net']},
@@ -221,33 +249,60 @@ class AggregateValidator(BaseValidator):
             round(exp_avg, 2), float(ac[e["avg"]]), DM,
             "dm_executive_sales_summary", "High", "R-AG-04", tolerance=self.avg_tol))
 
+        results.append(self._top_performers(business_date, ac, e))
+        return results
+
+    def _top_performers(self, business_date, ac, e):
+        """AGG-V07: top_region and top_channel must hold real derived values.
+
+        A non-region placeholder such as 'See Region Report' is reported
+        explicitly, because the stored value is not a data value at all.
+        """
         res = self._res("AGG-V07", LAYER, "top_region and top_channel derived correctly",
                         source_object=DM, target_object="dm_executive_sales_summary",
                         severity="Medium", risk_ref="R-AG-05")
         tr = self._q("datamart", f"""
-            SELECT region_name FROM {DM} WHERE sale_date = :d
+            SELECT region_name FROM {DM}
+            WHERE sale_date = :d AND {self._status_clause()}
             GROUP BY region_name ORDER BY SUM(net_sales_amount) DESC LIMIT 1""",
             {"d": business_date})
         tc_ = self._q("datamart", f"""
-            SELECT source_channel FROM {DM} WHERE sale_date = :d
+            SELECT source_channel FROM {DM}
+            WHERE sale_date = :d AND {self._status_clause()}
             GROUP BY source_channel ORDER BY SUM(net_sales_amount) DESC LIMIT 1""",
             {"d": business_date})
         if tr is None or tc_ is None:
-            results.append(self._blocked(res, "Data mart could not be read"))
+            return self._blocked(res, "Data mart could not be read")
+
+        exp_r = tr.iloc[0, 0] if not tr.empty else None
+        exp_c = tc_.iloc[0, 0] if not tc_.empty else None
+        act_r, act_c = ac[e["top_region"]], ac[e["top_channel"]]
+
+        allowed_regions = {r.upper() for r in self.rules["allowed_values"]["region_name"]}
+        allowed_channels = {c.upper() for c in self.rules["allowed_values"]["source_channel"]}
+        placeholder = []
+        if str(act_r).strip().upper() not in allowed_regions:
+            placeholder.append(f"top_region='{act_r}'")
+        if str(act_c).strip().upper() not in allowed_channels:
+            placeholder.append(f"top_channel='{act_c}'")
+
+        res.expected = f"region={exp_r}, channel={exp_c}"
+        res.actual = f"region={act_r}, channel={act_c}"
+        if placeholder:
+            res.status = "FAIL"
+            res.message = ("executive summary stores a non-data placeholder instead of a "
+                           f"derived value: {', '.join(placeholder)}; "
+                           f"expected {res.expected}")
         else:
-            exp_r = tr.iloc[0, 0] if not tr.empty else None
-            exp_c = tc_.iloc[0, 0] if not tc_.empty else None
-            ok = (str(exp_r).upper() == str(ac[e["top_region"]]).upper() and
-                  str(exp_c).upper() == str(ac[e["top_channel"]]).upper())
-            res.expected = f"region={exp_r}, channel={exp_c}"
-            res.actual = f"region={ac[e['top_region']]}, channel={ac[e['top_channel']]}"
+            ok = (str(exp_r).upper() == str(act_r).upper() and
+                  str(exp_c).upper() == str(act_c).upper())
             res.status = "PASS" if ok else "FAIL"
             res.message = f"expected {res.expected}; actual {res.actual}"
-            res.compute_variance()
-            log.info("[AGG-V07] %s - %s", res.status, res.message)
-            results.append(res)
-        return results
+        res.compute_variance()
+        log.info("[AGG-V07] %s - %s", res.status, res.message)
+        return res
 
+    # ---------------- cross-model ----------------
     def validate_cross_consistency(self, business_date):
         net = self.s["net"]
         res = self._res("AGG-V08", LAYER,
