@@ -7,6 +7,11 @@ Schema notes (02CreateTables.sql):
   * master/reference tables live in fs_source_retail
   * branch_region_mapping_raw is the region reference (no zone_name)
   * there is no distributor_master table
+
+Status semantics: BLOCKED means the validation could not be executed (the
+object could not be read, a required column is absent, a service is
+unreachable). An empty result set is not a blocker - it is SKIPPED, because
+the check simply has nothing to evaluate for that business date.
 """
 import pandas as pd
 
@@ -37,7 +42,8 @@ class SourceToStagingValidator(BaseValidator):
 
     @staticmethod
     def _filter_status(df, col, values):
-        if df is None or df.empty or col not in df.columns:
+        """Filter to the given statuses, preserving columns when empty."""
+        if df is None or col not in df.columns:
             return pd.DataFrame()
         wanted = {v.upper() for v in values}
         return df[df[col].astype(str).str.upper().isin(wanted)]
@@ -67,20 +73,20 @@ class SourceToStagingValidator(BaseValidator):
 
         if blocked:
             results.append(self._blocked(
-                self._res("RET-V01", LAYER, "Retail COMPLETED source count vs staging count",
+                self._res("RET-V01", LAYER, "Retail valid source count vs staging count",
                           source_object=cfg["source_table"], target_object=tbl,
                           severity="Critical", risk_ref="R-SS-01"),
                 "Source or staging table could not be read"))
         else:
             results.append(self.validate_count(
-                "RET-V01", LAYER, "Retail COMPLETED source count vs staging count",
+                "RET-V01", LAYER, "Retail valid source count vs staging count",
                 len(src_ok), len(stg), cfg["source_table"], tbl, "Critical", "R-SS-01"))
 
         excluded = self._filter_status(src_all, sc, cfg["excluded_status"])
         leaked = None if blocked else (
             stg[stg[pk].isin(excluded[pk])] if not excluded.empty else pd.DataFrame())
         results.append(self.validate_empty(
-            "RET-V02", LAYER, "CANCELLED retail transactions must not reach staging",
+            "RET-V02", LAYER, "Excluded-status retail transactions must not reach staging",
             leaked, cfg["source_table"], tbl, "Critical", "R-SS-03"))
 
         results.append(self.validate_duplicates(
@@ -90,13 +96,13 @@ class SourceToStagingValidator(BaseValidator):
         if blocked:
             results.append(self._blocked(
                 self._res("RET-V04", LAYER,
-                          "All COMPLETED retail transaction_ids present in staging",
+                          "All valid retail transaction_ids present in staging",
                           source_object=f"{cfg['source_table']}.{pk}",
                           target_object=f"{tbl}.{pk}", severity="High", risk_ref="R-SS-04"),
                 "Source or staging table could not be read"))
         else:
             results.append(self.validate_key_sets(
-                "RET-V04", LAYER, "All COMPLETED retail transaction_ids present in staging",
+                "RET-V04", LAYER, "All valid retail transaction_ids present in staging",
                 src_ok[pk].tolist(), stg[pk].tolist(),
                 f"{cfg['source_table']}.{pk}", f"{tbl}.{pk}", "High", "R-SS-04"))
 
@@ -137,20 +143,20 @@ class SourceToStagingValidator(BaseValidator):
 
         if blocked:
             results.append(self._blocked(
-                self._res("DST-V01", LAYER, "Distributor APPROVED count vs staging count",
+                self._res("DST-V01", LAYER, "Distributor valid source count vs staging count",
                           source_object=cfg["source_table"], target_object=tbl,
                           severity="Critical", risk_ref="R-SS-01"),
                 "Source or staging table could not be read"))
         else:
             results.append(self.validate_count(
-                "DST-V01", LAYER, "Distributor APPROVED count vs staging count",
+                "DST-V01", LAYER, "Distributor valid source count vs staging count",
                 len(src_ok), len(stg), cfg["source_table"], tbl, "Critical", "R-SS-01"))
 
         excluded = self._filter_status(src, sc, cfg["excluded_status"])
         leaked = None if blocked else (
             stg[stg[pk_t].isin(excluded[pk_s])] if not excluded.empty else pd.DataFrame())
         results.append(self.validate_empty(
-            "DST-V02", LAYER, "Non-APPROVED distributor transactions must not reach staging",
+            "DST-V02", LAYER, "Excluded-status distributor transactions must not reach staging",
             leaked, cfg["source_table"], tbl, "Critical", "R-SS-03"))
 
         if blocked:
@@ -171,7 +177,9 @@ class SourceToStagingValidator(BaseValidator):
             "DST-V05", LAYER, "Duplicate transaction_id in distributor staging",
             stg, pk_t, tbl, "High", "R-SS-02"))
 
-        src_cmp = None if blocked or src_ok.empty else src_ok.rename(columns={pk_s: pk_t})
+        # An empty source is not a blocker: rename() preserves the (empty) frame
+        # so validate_field_match reports SKIPPED rather than BLOCKED.
+        src_cmp = None if blocked else src_ok.rename(columns={pk_s: pk_t})
         results.append(self.validate_field_match(
             "DST-V06", LAYER, "Distributor field-level comparison source vs staging",
             src_cmp, stg, pk_t, cfg["compare_columns"],
@@ -214,20 +222,20 @@ class SourceToStagingValidator(BaseValidator):
 
         if blocked:
             results.append(self._blocked(
-                self._res("ONL-V05", LAYER, "Online COMPLETED source count vs staging count",
+                self._res("ONL-V05", LAYER, "Online valid source count vs staging count",
                           source_object=cfg["source_table"], target_object=tbl,
                           severity="Critical", risk_ref="R-SS-01"),
                 "Source or staging table could not be read"))
         else:
             results.append(self.validate_count(
-                "ONL-V05", LAYER, "Online COMPLETED source count vs staging count",
+                "ONL-V05", LAYER, "Online valid source count vs staging count",
                 len(src_ok), len(stg), cfg["source_table"], tbl, "Critical", "R-SS-01"))
 
         excluded = self._filter_status(src, sc, cfg["excluded_status"])
         leaked = None if blocked else (
             stg[stg[pk].isin(excluded[pk])] if not excluded.empty else pd.DataFrame())
         results.append(self.validate_empty(
-            "ONL-V06", LAYER, "PENDING or FAILED online transactions must not reach staging",
+            "ONL-V06", LAYER, "Excluded-status online transactions must not reach staging",
             leaked, cfg["source_table"], tbl, "Critical", "R-SS-03"))
 
         results.append(self.validate_duplicates(
@@ -329,7 +337,7 @@ class SourceToStagingValidator(BaseValidator):
         if df is None:
             return self._blocked(res, "Source object could not be read")
         if df.empty:
-            return self._skipped(res, "No rows for the business date")
+            return self._skipped(res, "No valid-status rows for the business date")
         required = ["sale_date", "gross_amount", "discount_amount"]
         absent = [c for c in required if c not in df.columns]
         if absent:
